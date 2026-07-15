@@ -1,0 +1,24 @@
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Copperbrain runtime data and project outputs
+.copperbrain/
+copperbrain-output/
+*.sqlite-wal
+*.sqlite-shm
+*.bak
+
+# KiCad editor locks and generated fabrication outputs
+*.lck
+*.gbr
+*.drl
+*.zip

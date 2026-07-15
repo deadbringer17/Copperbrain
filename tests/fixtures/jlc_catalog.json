@@ -1,0 +1,58 @@
+[
+  {
+    "lcsc": "C10002",
+    "mpn": "LM2596SX-5.0/NOPB",
+    "manufacturer": "Texas Instruments",
+    "description": "fixed 5V 3A buck regulator for 4.5V to 40V input",
+    "package": "TO-263-5",
+    "basic_extended": "unknown",
+    "stock": 26797,
+    "price_breaks": [
+      {"quantity": 1, "unit_price": 1.206, "currency": "USD"},
+      {"quantity": 10, "unit_price": 1.079, "currency": "USD"},
+      {"quantity": 100, "unit_price": 0.87, "currency": "USD"}
+    ],
+    "datasheet_url": "https://www.lcsc.com/datasheet/lcsc_datasheet_2304140030_Texas-Instruments-LM2596SX-5-0-NOPB_C10002.pdf",
+    "asset_availability": {
+      "symbol": true,
+      "footprint": true,
+      "model_3d": true,
+      "datasheet": true
+    },
+    "source": "recorded JLCPCB Tools fixture",
+    "retrieved_at": "2026-06-08T07:30:50Z"
+  },
+  {
+    "lcsc": "C25804",
+    "mpn": "0603WAF1002T5E",
+    "manufacturer": "Uniroyal Elec",
+    "description": "10k 1% resistor",
+    "package": "0603",
+    "basic_extended": "basic",
+    "stock": 500000,
+    "price_breaks": [
+      {"quantity": 1, "unit_price": 0.001, "currency": "USD"},
+      {"quantity": 100, "unit_price": 0.0008, "currency": "USD"}
+    ],
+    "asset_availability": {
+      "symbol": true,
+      "footprint": true,
+      "model_3d": true,
+      "datasheet": true
+    },
+    "source": "recorded JLCPCB/LCSC fixture",
+    "retrieved_at": "2026-07-14T00:00:00Z"
+  },
+  {
+    "lcsc": "C99999",
+    "mpn": "ALT-10K-0603",
+    "manufacturer": "Example",
+    "description": "10k 1% resistor",
+    "package": "0603",
+    "basic_extended": "extended",
+    "stock": 10000,
+    "price_breaks": [{"quantity": 1, "unit_price": 0.002, "currency": "USD"}],
+    "source": "recorded JLCPCB/LCSC fixture",
+    "retrieved_at": "2026-07-14T00:00:00Z"
+  }
+]
