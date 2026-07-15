@@ -47,3 +47,13 @@ def test_publish_preview_is_project_local_and_excludes_nested_outputs(tmp_path: 
     assert not (published / OUTPUT_DIRECTORY).exists()
     assert not (published / ".history").exists()
     assert not (published / "demo-backups").exists()
+
+
+def test_publish_preview_rejects_recursive_output_root(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    output_copy = tmp_path / OUTPUT_DIRECTORY / "previews" / "old"
+    output_copy.mkdir(parents=True)
+
+    with pytest.raises(CopperbrainError, match="cannot be used as a source"):
+        publish_preview(workspace, output_copy, "nested")

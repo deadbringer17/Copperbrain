@@ -256,14 +256,18 @@ class PcbRuleService:
                 profile.min_track_width_mm,
                 requirement.track_width_mm or estimated,
             )
-            minimum = preferred if requirement.current_a is not None else profile.min_track_width_mm
+            # The class minimum must remain fabricable at fine-pitch neck-downs. The reviewed
+            # current-carrying width is retained as the preferred width and is emitted as the
+            # router's netclass width; local courtyard rules cap only the short pad fanout.
+            minimum = profile.min_track_width_mm
             rationale = [
                 f"Clearance is not below fabrication minimum {profile.min_clearance_mm:g} mm",
                 f"Track width is not below fabrication minimum {profile.min_track_width_mm:g} mm",
             ]
             if requirement.current_a is not None:
                 rationale.append(
-                    "Track minimum uses a conservative IPC-2221-style estimate from current, "
+                    "Preferred track width uses a conservative IPC-2221-style estimate "
+                    "from current, "
                     "copper thickness, layer type, and allowed temperature rise"
                 )
             if requirement.role == "power" and requirement.current_a is None:
@@ -423,7 +427,10 @@ class PcbRuleService:
                     footprint=component.footprint,
                     min_track_width_mm=profile.min_track_width_mm,
                     max_track_width_mm=min(required_width, safe_width),
-                    clearance_mm=min(required_clearance, safe_clearance),
+                    # Fine-pitch fanout is the explicit local exception to a wider class
+                    # clearance. It may use the reviewed fabrication minimum while the
+                    # package courtyard bounds the exception.
+                    clearance_mm=profile.min_clearance_mm,
                     pad_min_dimension_mm=geometry.pad_min_dimension_mm,
                     pad_min_clearance_mm=safe_clearance,
                     min_pitch_mm=geometry.min_pitch_mm,
@@ -431,7 +438,8 @@ class PcbRuleService:
                         f"Preferred net width {required_width:g} mm exceeds safe pad fanout",
                         f"Fanout capped at {profile.fanout_width_ratio:g} of the smallest "
                         "pad dimension",
-                        f"Local clearance capped by the {safe_clearance:g} mm minimum pad gap",
+                        f"Local clearance uses fabrication minimum "
+                        f"{profile.min_clearance_mm:g} mm within the courtyard",
                     ),
                 )
             )

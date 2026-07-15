@@ -35,6 +35,21 @@ To demonstrate the PCB-rule extension:
 
 The extension configures routing constraints only. It neither routes nor rewrites PCB tracks.
 
+To demonstrate controlled PCB routing after rules and placement are ready:
+
+1. call `get_routing_backend_status` and verify Java 25+, FreeRouting, and KiCad Python;
+2. call `analyze_unrouted_nets` and review the disconnected pad groups;
+3. call `propose_pcb_routing` with exact nets or an empty list for every routable net, then compare
+   completion, DRC regression, open-connection, via, and length metrics for the candidates;
+4. pass the selected typed plan to `prepare_routing_change` and review the PDF, semantic diff,
+   connectivity result, assumptions, and comparative DRC;
+5. rerun `validate_routing_change`, save and close PCB Editor, then explicitly confirm
+   `apply_routing_change`;
+6. call `run_drc` and optionally demonstrate byte-exact restoration with
+   `rollback_routing_change`.
+
+The generated geometry is not an SI/PI/EMC, thermal, impedance, or regulatory certification.
+
 `prepare_schematic_change` returns the project-local preview directory under
 `copperbrain-output/previews/<change-set-id>/`, including `Copperbrain-preview.pdf`.
 `generate_bom` writes all three formats to `copperbrain-output/bom/` by default. If one format is

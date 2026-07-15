@@ -74,11 +74,20 @@ class SchematicApiAdapter:
                         "Property target component was not found",
                         details={"reference": operation.target},
                     )
-                component.add_property(
-                    _string(parameters, "name"),
-                    _string(parameters, "value"),
-                    hidden=parameters.get("hidden") is True,
-                )
+                name = _string(parameters, "name")
+                value = _string(parameters, "value")
+                hidden = parameters.get("hidden") is True
+                # kicad-sch-api stores these standard fields separately from
+                # custom properties. Using add_property() for them updates only
+                # the property map and the preserved S-expression wins on save.
+                if name == "Footprint":
+                    component.footprint = value
+                    component.set_property_effects(name, {"visible": not hidden})
+                elif name == "Value":
+                    component.value = value
+                    component.set_property_effects(name, {"visible": not hidden})
+                else:
+                    component.add_property(name, value, hidden=hidden)
             elif operation.kind == "connect":
                 if "from_reference" in parameters and "to_reference" in parameters:
                     schematic.add_wire_between_pins(

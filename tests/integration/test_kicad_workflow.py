@@ -7,8 +7,9 @@ from copperbrain.adapters.jlc_catalog import (
     JlcpcbToolsDatabaseAdapter,
     discover_jlcpcb_tools_database,
 )
-from copperbrain.adapters.kicad_cli import run_drc
+from copperbrain.adapters.kicad_cli import export_pcb_pdf, run_drc
 from copperbrain.adapters.kicad_detection import detect_kicad
+from copperbrain.adapters.pcb_design import PcbFileAdapter
 from copperbrain.adapters.pcb_rules import PcbRuleAdapter
 from copperbrain.adapters.schematic_api import SchematicApiAdapter
 from copperbrain.models import (
@@ -18,6 +19,8 @@ from copperbrain.models import (
     NetClassAssignment,
     NetClassRule,
     PcbRuleSet,
+    PlacementOperation,
+    RouteSegment,
 )
 from copperbrain.services.changes import ChangeService
 from copperbrain.services.projects import ProjectService
@@ -153,6 +156,86 @@ def test_generated_pcb_rules_are_accepted_by_real_kicad_drc(tmp_path: Path) -> N
     adapter = PcbRuleAdapter()
     adapter.apply(project, rules, rule_set)
     assert adapter.validate(project, rules).valid
+    report = run_drc(cli, board)
+    assert report.available
+    assert report.error is None
+
+
+def test_real_kicad_accepts_typed_placement_and_exports_preview(tmp_path: Path) -> None:
+    detection = detect_kicad()
+    cli = detection.selected_cli
+    if cli is None:
+        pytest.skip("KiCad CLI is not installed")
+    source = cli.parent.parent / "share" / "kicad" / "demos" / "ecc83" / "ecc83-pp.kicad_pcb"
+    if not source.is_file():
+        pytest.skip("Installed KiCad distribution does not include the ecc83 demo")
+    board = tmp_path / "ecc83-pp.kicad_pcb"
+    shutil.copy2(source, board)
+    adapter = PcbFileAdapter()
+    summary = adapter.summary(board, "integration")
+    reference_counts = {
+        item.reference: sum(other.reference == item.reference for other in summary.footprints)
+        for item in summary.footprints
+    }
+    movable = next(
+        item
+        for item in summary.footprints
+        if not item.locked and reference_counts[item.reference] == 1
+    )
+    adapter.apply_placement(
+        board,
+        (
+            PlacementOperation(
+                reference=movable.reference,
+                x_mm=movable.x_mm + 0.5,
+                y_mm=movable.y_mm,
+                rotation_deg=movable.rotation_deg,
+            ),
+        ),
+    )
+    assert adapter.validate(board).valid
+    report = run_drc(cli, board)
+    assert report.available
+    assert report.error is None
+    preview = export_pcb_pdf(cli, board, tmp_path / "preview.pdf")
+    assert preview.is_file() and preview.stat().st_size > 0
+
+
+def test_real_kicad_accepts_typed_routing_and_reports_connected_net(tmp_path: Path) -> None:
+    detection = detect_kicad()
+    cli = detection.selected_cli
+    if cli is None:
+        pytest.skip("KiCad CLI is not installed")
+    source = Path("tests/fixtures/kicad10_placement/placement.kicad_pcb")
+    board = tmp_path / "routing.kicad_pcb"
+    shutil.copy2(source, board)
+    text = board.read_text(encoding="utf-8")
+    text = text.replace(
+        '  (segment (start 9.2 10) (end 19.2 10) (width 0.25) (layer "F.Cu") (net 1))\n',
+        "",
+    )
+    text = text.replace(
+        '  (via (at 14 10) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))\n',
+        "",
+    )
+    board.write_text(text, encoding="utf-8")
+    adapter = PcbFileAdapter()
+    assert not adapter.analyze_routing(board, "integration").complete
+    adapter.apply_routing(
+        board,
+        (
+            RouteSegment(
+                net="GND",
+                start_x_mm=9.2,
+                start_y_mm=10,
+                end_x_mm=19.2,
+                end_y_mm=10,
+                width_mm=0.25,
+            ),
+        ),
+        (),
+    )
+    assert adapter.analyze_routing(board, "integration").complete
     report = run_drc(cli, board)
     assert report.available
     assert report.error is None

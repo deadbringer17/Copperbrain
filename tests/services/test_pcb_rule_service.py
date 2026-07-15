@@ -79,7 +79,8 @@ def test_analysis_classifies_power_differential_and_switching_nets(tmp_path: Pat
 def test_proposal_sizes_high_current_track_and_rejects_unsafe_intent(tmp_path: Path) -> None:
     service, _, session = setup(tmp_path)
     proposal = service.propose(session, ManufacturingProfile(), (requirement(),))
-    assert proposal.classes[0].track_width_min_mm > 0.2
+    assert proposal.classes[0].track_width_min_mm == 0.2
+    assert proposal.classes[0].track_width_preferred_mm > 0.2
     assert proposal.assignments[0].net == "/+5V"
     with pytest.raises(CopperbrainError, match="explicit reviewed clearance"):
         service.propose(
@@ -181,7 +182,7 @@ def test_fine_pitch_component_gets_local_neckdown_and_courtyard(tmp_path: Path) 
     proposal = service.propose(session.id, ManufacturingProfile(), (requirement,))
     assert proposal.fanout_constraints[0].reference == "U1"
     assert proposal.fanout_constraints[0].max_track_width_mm == 0.27
-    assert proposal.fanout_constraints[0].clearance_mm == 0.3
+    assert proposal.fanout_constraints[0].clearance_mm == 0.2
     assert proposal.courtyard_additions[0].footprint == "CB:FinePitch"
     change = service.prepare(session.id, proposal)
     assert change.status is ChangeStatus.VALIDATED
@@ -189,9 +190,10 @@ def test_fine_pitch_component_gets_local_neckdown_and_courtyard(tmp_path: Path) 
     assert '(layer "F.CrtYd")' in preview_footprint.read_text(encoding="utf-8")
     rules = (change.preview_directory / "demo.kicad_dru").read_text(encoding="utf-8")
     assert "A.intersectsCourtyard('U1')" in rules
-    assert "(max 0.27mm)" in rules
+    assert "(opt 0.27mm)" in rules
+    assert "(max 0.27mm)" not in rules
     assert "Copperbrain_fanout_clearance_U1" in rules
-    assert "(constraint clearance (min 0.3mm))" in rules
+    assert "(constraint clearance (min 0.2mm))" in rules
     assert '(layer "F.CrtYd")' not in footprint.read_text(encoding="utf-8")
     service.apply(change.id, confirmed=True, editor_closed=True)
     assert '(layer "F.CrtYd")' in footprint.read_text(encoding="utf-8")

@@ -1,7 +1,7 @@
 [project]
 name = "copperbrain"
 version = "0.1.0"
-description = "Safe local MCP server for KiCad schematic analysis and controlled changes"
+description = "Safe local MCP server for KiCad schematic and PCB analysis with controlled changes"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -9,6 +9,7 @@ dependencies = [
   "mcp>=1.12,<2",
   "pydantic>=2.10,<3",
   "platformdirs>=4.3,<5",
+  "kicad-python>=0.5,<1",
 ]
 
 [project.optional-dependencies]

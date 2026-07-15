@@ -389,3 +389,193 @@ custom design rules KiCad 10 senza introdurre autorouting o generazione autonoma
 - [x] Apply richiede conferma esplicita, editor chiuso e hash non stale.
 - [x] Rollback ripristina byte-per-byte `.kicad_pro` e lo stato originario del `.kicad_dru`.
 - [x] Autorouting e modifica delle piste restano fuori scope.
+
+## 14. Estensione approvata — ispezione e placement PCB via MCP
+
+Questa estensione introduce un vertical slice completo per ispezionare la geometria del board,
+analizzare la qualita del placement, proporre posizioni deterministiche e applicare spostamenti di
+footprint in sicurezza. Routing, zone in rame, keepout e modifica del board outline restano fuori
+da questa estensione.
+
+### Contratti MCP
+
+| Tool | Tipo | Risultato essenziale |
+|---|---|---|
+| `get_pcb_summary` | lettura | outline, footprint, net, piste, via, zone e stato IPC |
+| `inspect_pcb_net` | lettura | pad, riferimenti, lunghezza instradata, via e layer di una rete |
+| `get_footprint_placement` | lettura | posizione, rotazione, layer, lock e bounding box |
+| `analyze_placement` | lettura | score, overlap e footprint esterni a Edge.Cuts |
+| `propose_component_placement` | lettura | operazioni tipizzate e deterministiche in una regione validata |
+| `prepare_placement_change` | anteprima | copia temporanea, diff semantico, PDF, DRC e rischi |
+| `validate_placement_change` | lettura | parsing strutturale e DRC senza nuove regressioni |
+| `apply_placement_change` | scrittura confermata | snapshot e sostituzione atomica dopo hash/editor check |
+| `rollback_placement_change` | scrittura confermata | ripristino byte-per-byte del PCB |
+| `export_pcb_preview` | lettura/output | copia di anteprima e PDF sotto `copperbrain-output/previews/` |
+
+### Architettura e sicurezza
+
+- `PcbDesignService` orchestra query, proposta e change set senza dipendere dal trasporto MCP.
+- `PcbFileAdapter` analizza il formato PCB e applica esclusivamente `PlacementOperation` tipizzate;
+  non accetta S-expression o frammenti KiCad forniti dal chiamante.
+- `KiCadPcbIpcAdapter` usa il binding ufficiale `kicad-python` per board gia aperti e verifica che il
+  documento IPC corrisponda esattamente al percorso atteso prima di iniziare una transazione.
+- L'IPC e opzionale a runtime. Ispezione, proposta, preview e validazione restano disponibili in
+  modalita offline tramite file adapter e `kicad-cli`.
+- La proposta usa geometria courtyard incorporata quando disponibile, altrimenti limiti
+  conservativi derivati da pad e grafica del footprint. Non deduce intento meccanico, termico, RF,
+  SI o PI.
+- La mutazione segue sempre `prepare -> preview -> explicit confirmation -> validate -> apply`, con
+  workspace privato, PDF progetto, DRC comparativo, hash anti-stale, snapshot e rollback.
+- Apply e rollback richiedono editor salvato e chiuso. Il progetto live non cambia durante analisi,
+  proposta, preparazione o validazione.
+- Il file adapter consente spostamento e rotazione sul lato esistente; il flip `F.Cu`/`B.Cu` resta
+  fuori scope perche richiede la trasformazione coordinata di pad, grafica, testo e modelli.
+
+### Criteri di accettazione
+
+- [x] Outline, footprint e connettivita PCB sono restituiti in modelli tipizzati.
+- [x] L'analisi segnala overlap e footprint esterni ai limiti Edge.Cuts.
+- [x] Un board vuoto o senza outline restituisce `empty_board`/`missing_outline` e non riceve uno
+  score positivo.
+- [x] La proposta e deterministica, collision-free e limitata a riferimenti e regioni esplicite.
+- [x] Footprint mancanti o bloccati causano un rifiuto strutturato.
+- [x] La preview contiene copia del progetto e PDF nella directory di output consentita.
+- [x] Il DRC temporaneo non introduce nuovi errori rispetto al board originale.
+- [x] Apply richiede conferma, editor chiuso e hash sorgente non stale.
+- [x] Rollback ripristina il file `.kicad_pcb` byte-per-byte.
+- [x] Il binding IPC ufficiale e rilevato dinamicamente e non e requisito per i test offline.
+- [x] Routing, zone, keepout e outline mutation restano fuori scope.
+- [x] Il cambio lato del footprint e rifiutato esplicitamente.
+
+## 15. Estensione approvata — inizializzazione headless PCB via MCP
+
+Questa estensione prepara via codice un PCB iniziale non instradato partendo dallo schematico e da
+un piano geometrico tipizzato. E distinta dal placement su board esistente della sezione 14 ed e
+limitata a PCB vuoti, senza footprint, piste, zone o `Edge.Cuts` preesistenti.
+
+### Contratti MCP
+
+| Tool | Tipo | Risultato essenziale |
+|---|---|---|
+| `prepare_pcb_layout_change` | anteprima | sincronizzazione footprint, contorno rettangolare, placement completo, fori M3, PDF, ERC e DRC in workspace |
+| `validate_pcb_layout_change` | lettura | nuova validazione parser/ERC/DRC/placement della copia preparata |
+| `apply_pcb_layout_change` | scrittura confermata | snapshot e sostituzione atomica di schematico, PCB e regole gestite |
+| `rollback_pcb_layout_change` | scrittura confermata | ripristino byte-per-byte dei file applicati |
+
+### Architettura, sicurezza e limiti
+
+- L'MCP accetta solo `PcbLayoutPlan`, `RectangularBoardOutline`, `PlacementOperation` e
+  `MountingHoleSpec`; nessun frammento S-expression e accettato al confine pubblico.
+- `PcbLayoutService` orchestra workspace, sincronizzazione dello schematico, netlist, composizione,
+  upgrade KiCad, preview, confronto ERC/DRC, hash, snapshot, apply e rollback.
+- `PcbLayoutAdapter` risolve footprint installati o di progetto e compone il board esclusivamente
+  dalle operazioni tipizzate. Ogni componente dello schematico deve comparire una sola volta.
+- Le regole Copperbrain di clearance e creepage tra oggetti sono rese con esclusione dello stesso
+  parent footprint; le vecchie regole gestite sono migrate soltanto nella copia temporanea.
+- Il sorgente non cambia durante prepare e validate. Apply richiede change set validato, conferma
+  esplicita, editor chiuso, hash non stale e snapshot ripristinabile.
+- Routing, autorouting, zone rame, keepout, stackup, fabbricazione e verifica termica/EMC/SI/PI
+  restano fuori scope. Il risultato e uno scheletro PCB revisionabile, non un progetto pronto alla
+  produzione.
+
+### Criteri di accettazione
+
+- [x] Un client MCP puo costruire una preview PCB completa senza automazione GUI.
+- [x] Contorno, placement, fori e override footprint sono tipizzati e deterministici.
+- [x] Il piano incompleto, i riferimenti duplicati e i board non vuoti sono rifiutati.
+- [x] La preview e pubblicata soltanto sotto `copperbrain-output/previews/<change-set-id>/`.
+- [x] ERC, DRC e placement devono passare senza nuove regressioni prima dell'apply.
+- [x] Apply e rollback mantengono conferma, editor-state, stale-hash e atomicita.
+- [x] Nessuna pista, zona o keepout viene generato implicitamente.
+
+## 16. Estensione approvata — routing PCB controllato via MCP
+
+Questa estensione, approvata il 15 luglio 2026, abilita il completamento deterministico delle
+connessioni PCB tramite segmenti e via tipizzati. Supera l'esclusione generale del routing solo
+per questo workflow controllato; zone, keepout, tuning d'impedenza e certificazioni SI/PI/EMC
+restano fuori scope.
+
+### Contratti MCP
+
+| Tool | Tipo | Risultato essenziale |
+|---|---|---|
+| `get_routing_backend_status` | lettura | disponibilita locale di Java, FreeRouting e bridge Python KiCad |
+| `analyze_unrouted_nets` | lettura | gruppi di pad elettricamente disconnessi per rete |
+| `propose_pcb_routing` | lettura | candidati FreeRouting tipizzati, valutati e ordinati deterministicamente |
+| `prepare_routing_change` | anteprima | PCB temporaneo, diff, PDF, connettivita e DRC comparativo |
+| `validate_routing_change` | lettura | nuova verifica parser, connessioni richieste e DRC |
+| `apply_routing_change` | scrittura confermata | snapshot e sostituzione atomica dopo hash/editor check |
+| `rollback_routing_change` | scrittura confermata | ripristino byte-per-byte del PCB |
+| `restore_routing_snapshot` | scrittura confermata | recupero atomico di uno snapshot privato dopo verifica dell'identita della board |
+
+### Architettura, sicurezza e limiti
+
+- Il confine pubblico accetta soltanto `RoutingRequest`, `RoutingPlan`, `RouteSegment` e
+  `RouteVia`; non accetta S-expression o condizioni KiCad libere.
+- `PcbRoutingService` orchestra un backend specializzato locale e non implementa il pathfinding.
+  `FreeRoutingAdapter` usa soltanto comandi fissi, Java locale e il JAR configurato; nessun comando
+  o argomento eseguibile viene accettato dal confine MCP.
+- Il round-trip usa `pcbnew.ExportSpecctraDSN` e `pcbnew.ImportSpecctraSES` nel Python distribuito
+  con KiCad, sempre in workspace privato. Il risultato esterno viene ridotto a delta tipizzati
+  `RouteSegment`/`RouteVia`; la rimozione o modifica di rame preesistente e rifiutata.
+- Copperbrain puo eseguire configurazioni `prioritized` e `sequential`, misura completezza,
+  regressioni DRC, lunghezza, segmenti e via, quindi sceglie il candidato con ranking
+  deterministico. L'AI puo spiegare e valutare le evidenze, ma non puo superare i gate rigidi.
+- FreeRouting e opzionale e rilevato dinamicamente. La sua assenza produce un errore strutturato
+  con istruzioni di configurazione, senza fallback implicito al precedente A* lento.
+- La proposta dell'autorouter non dichiara da sola la fabbricabilita. Il change set diventa
+  applicabile solo se il parser accetta il PCB, le reti richieste risultano complete e KiCad DRC
+  non introduce nuovi errori.
+- Il workflow resta `prepare -> preview -> explicit confirmation -> validate -> apply`, con
+  workspace privato, hash anti-stale, editor chiuso, snapshot, sostituzione atomica e rollback.
+- Il routing non certifica impedenza, lunghezze accoppiate, ritorni di corrente, termica, SI, PI,
+  EMC o conformita normativa. Questi intenti richiedono regole esplicite e revisione tecnica.
+
+### Criteri di accettazione
+
+- [x] Analisi e proposta sono deterministiche e limitabili a nomi rete esatti.
+- [x] Segmenti e via sono tipizzati e riferiscono soltanto reti esistenti.
+- [x] Dimensioni predefinite possono essere sostituite dalle netclass del progetto.
+- [x] Prepare e validate non modificano il sorgente e pubblicano la preview nel progetto.
+- [x] Completezza elettrica e DRC comparativo sono gate dell'apply.
+- [x] Apply richiede conferma, editor chiuso e hash non stale.
+- [x] Rollback ripristina il `.kicad_pcb` byte-per-byte.
+- [x] Java, JAR FreeRouting e Python KiCad sono rilevati senza path macchina hard-coded.
+- [x] Il bridge DSN/SES opera headless in workspace privato e non modifica il progetto sorgente.
+- [x] Il delta importato e tipizzato e rifiuta rimozioni di rame o layer non supportati.
+- [x] Due configurazioni candidate possono essere valutate con ranking riproducibile e strutturato.
+- [x] L'assenza del backend restituisce un errore azionabile e non avvia il router A* interno.
+
+## 17. Hardening approvato — finalizzazione PCB persistente e readiness
+
+Questo hardening, approvato il 15 luglio 2026, rende il workflow di routing riprendibile dopo un
+riavvio MCP e introduce una superficie compatta di finalizzazione. Non elimina i gate di conferma
+e non estende il routing a zone, keepout o certificazioni di produzione.
+
+### Contratti MCP
+
+| Tool | Tipo | Risultato essenziale |
+|---|---|---|
+| `get_routing_change_summary` | lettura | evidenza compatta di stato, completezza, DRC, segmenti/via e preview |
+| `assess_pcb_readiness` | lettura | gate elettrici e limiti produttivi non valutati tenuti separati |
+| `prepare_pcb_finalization` | anteprima | proposta, workspace, preview e manifest routing persistente |
+| `validate_pcb_finalization` | lettura | nuova validazione di un workflow ripreso dallo storage privato |
+| `apply_pcb_finalization` | scrittura confermata | apply atomico del routing e report readiness aggiornato |
+| `get_pcb_finalization_report` | lettura | report compatto corrente di un workflow persistito |
+
+### Decisioni e criteri di accettazione
+
+- [x] I manifest routing sono Pydantic, versionati, scritti atomicamente e confinati sotto
+  `COPPERBRAIN_DATA_DIR`; workspace e snapshot fuori dalle directory private sono rifiutati.
+- [x] Validate, apply e rollback possono riprendere un change set dopo il riavvio del server,
+  riaprendo il progetto sorgente e ricostruendo solo path relativi validati.
+- [x] L'input incrementale con rame preesistente e rifiutato per default; il policy `preserve`
+  richiede una scelta esplicita ed e protetto dal watchdog.
+- [x] Il processo Java ha limite wall-time, rilevamento stall e rilevamento del loop noto
+  `PolylineTrace.normalize`, con cleanup del process tree e errore strutturato.
+- [x] Un progetto sotto `copperbrain-output/` non puo essere aperto come sorgente o generare una
+  preview ricorsiva.
+- [x] Un routing elettricamente completo e pulito non viene dichiarato automaticamente pronto
+  per produzione: termica, SI/PI, EMC, stackup, impedenza e DFM restano `not_assessed`.
+- [x] Apply e rollback continuano a richiedere conferma esplicita, editor chiuso, hash non stale,
+  snapshot e sostituzione atomica.

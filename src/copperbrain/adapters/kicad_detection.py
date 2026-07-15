@@ -18,6 +18,35 @@ def _candidate_install_roots() -> tuple[Path, ...]:
     for variable in ("ProgramFiles", "ProgramFiles(x86)"):
         if base := os.getenv(variable):
             roots.append(Path(base) / "KiCad")
+    roots.extend(_windows_registry_install_roots())
+    return tuple(dict.fromkeys(roots))
+
+
+def _windows_registry_install_roots() -> tuple[Path, ...]:
+    """Discover KiCad roots even when an MCP host passes a minimal environment."""
+    if os.name != "nt":
+        return ()
+    import winreg
+
+    roots: list[Path] = []
+    uninstall = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+    views = (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY)
+    for view in views:
+        try:
+            parent = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, uninstall, 0, winreg.KEY_READ | view)
+        except OSError:
+            continue
+        with parent:
+            for index in range(winreg.QueryInfoKey(parent)[0]):
+                try:
+                    name = winreg.EnumKey(parent, index)
+                    with winreg.OpenKey(parent, name) as item:
+                        display_name = str(winreg.QueryValueEx(item, "DisplayName")[0])
+                        install_location = str(winreg.QueryValueEx(item, "InstallLocation")[0])
+                except OSError:
+                    continue
+                if display_name.lower().startswith("kicad ") and install_location:
+                    roots.append(Path(install_location).resolve().parent)
     return tuple(dict.fromkeys(roots))
 
 

@@ -22,9 +22,27 @@ PROJECT_COPY_IGNORE = shutil.ignore_patterns(
 )
 
 
+def is_output_tree(path: Path) -> bool:
+    """Return whether a path is inside a generated Copperbrain deliverable tree."""
+    return any(part.casefold() == OUTPUT_DIRECTORY.casefold() for part in path.resolve().parts)
+
+
+def require_source_project_root(project_root: Path) -> Path:
+    """Refuse to publish relative to an output copy, preventing recursive previews."""
+    resolved = project_root.expanduser().resolve()
+    if is_output_tree(resolved):
+        raise CopperbrainError(
+            ErrorCode.CONFLICT,
+            "A Copperbrain output copy cannot be used as a source project",
+            actionable_hint="Open the original KiCad project outside copperbrain-output/.",
+            details={"path": str(resolved)},
+        )
+    return resolved
+
+
 def project_output_root(project_root: Path) -> Path:
     """Return the only directory allowed for deliverable project artifacts."""
-    return project_root.expanduser().resolve() / OUTPUT_DIRECTORY
+    return require_source_project_root(project_root) / OUTPUT_DIRECTORY
 
 
 def output_path(project_root: Path, category: str, filename: str) -> Path:

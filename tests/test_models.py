@@ -8,8 +8,13 @@ from copperbrain.models import (
     ManufacturingProfile,
     NetClassAssignment,
     NetClassRule,
+    PcbBounds,
+    PcbLayoutPlan,
     PcbRuleSet,
+    PlacementOperation,
+    PlacementRequest,
     PriceBreak,
+    RectangularBoardOutline,
     utc_now,
 )
 
@@ -71,5 +76,23 @@ def test_pcb_rule_set_rejects_ambiguous_assignments() -> None:
             assignments=(
                 NetClassAssignment(net="/A", netclass="SIGNAL"),
                 NetClassAssignment(net="/A", netclass="SIGNAL"),
+            ),
+        )
+
+
+def test_placement_contracts_reject_invalid_regions_and_duplicate_references() -> None:
+    with pytest.raises(ValidationError, match="positive area"):
+        PcbBounds(min_x_mm=1, min_y_mm=1, max_x_mm=1, max_y_mm=2)
+    with pytest.raises(ValidationError, match="unique"):
+        PlacementRequest(references=("R1", "R1"))
+
+
+def test_layout_plan_rejects_duplicate_component_references() -> None:
+    with pytest.raises(ValidationError, match="unique references"):
+        PcbLayoutPlan(
+            outline=RectangularBoardOutline(width_mm=20, height_mm=10),
+            placements=(
+                PlacementOperation(reference="R1", x_mm=1, y_mm=1),
+                PlacementOperation(reference="R1", x_mm=2, y_mm=2),
             ),
         )

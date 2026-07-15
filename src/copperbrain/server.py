@@ -10,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import TypeAdapter
 
 from copperbrain.adapters.downloads import DownloadAdapter
+from copperbrain.adapters.freerouting import FreeRoutingAdapter
 from copperbrain.adapters.jlc_catalog import configured_catalog
 from copperbrain.adapters.kicad_detection import detect_kicad as detect_kicad_service
 from copperbrain.config import Settings
@@ -22,8 +23,13 @@ from copperbrain.models import (
     ErrorCode,
     ManufacturingProfile,
     NetRuleRequirement,
+    PcbLayoutPlan,
     PcbRuleSet,
+    PlacementOperation,
+    PlacementRequest,
     RequirementSet,
+    RoutingPlan,
+    RoutingRequest,
 )
 from copperbrain.services.assets import AssetService
 from copperbrain.services.bom import enrich_bom, export_bom
@@ -31,6 +37,10 @@ from copperbrain.services.bom import estimate_bom_cost as estimate_bom
 from copperbrain.services.bom import generate_bom as generate_bom_lines
 from copperbrain.services.changes import ChangeService
 from copperbrain.services.outputs import output_path
+from copperbrain.services.pcb_design import PcbDesignService
+from copperbrain.services.pcb_finalization import PcbFinalizationService
+from copperbrain.services.pcb_layout import PcbLayoutService
+from copperbrain.services.pcb_routing import PcbRoutingService
 from copperbrain.services.pcb_rules import PcbRuleService
 from copperbrain.services.projects import ProjectService
 from copperbrain.services.sourcing import (
@@ -50,6 +60,21 @@ sourcing = SourcingService(
 )
 changes = ChangeService(projects, settings.data_dir)
 pcb_rules = PcbRuleService(projects, settings.data_dir)
+pcb_design = PcbDesignService(projects, settings.data_dir)
+pcb_layout = PcbLayoutService(projects, settings.data_dir)
+pcb_routing = PcbRoutingService(
+    projects,
+    settings.data_dir,
+    routing_backend=FreeRoutingAdapter.discover(
+        settings.data_dir,
+        explicit_jar=settings.freerouting_jar,
+        explicit_java=settings.freerouting_java,
+        timeout_seconds=settings.freerouting_timeout_seconds,
+        stall_seconds=settings.freerouting_stall_seconds,
+        normalization_limit=settings.freerouting_normalization_limit,
+    ),
+)
+pcb_finalization = PcbFinalizationService(projects, pcb_design, pcb_routing)
 downloads = DownloadAdapter(
     settings.allowed_download_hosts,
     timeout=settings.connect_timeout_seconds + settings.read_timeout_seconds,
@@ -181,6 +206,239 @@ def rollback_pcb_rule_change(
 ) -> dict[str, object]:
     """Restore the project and custom-rule snapshot after explicit confirmation."""
     return pcb_rules.rollback(
+        change_set_id, confirmed=confirmed, editor_closed=editor_closed
+    ).model_dump(mode="json")
+
+
+@mcp.tool()
+def get_pcb_summary(session_id: str) -> dict[str, object]:
+    """Inspect board outline, footprints, nets, tracks, vias, zones, and IPC availability."""
+    return pcb_design.summary(session_id).model_dump(mode="json")
+
+
+@mcp.tool()
+def inspect_pcb_net(session_id: str, net_name: str) -> dict[str, object]:
+    """Return PCB pads, references, routed length, vias, and layers for one exact net."""
+    return pcb_design.inspect_net(session_id, net_name).model_dump(mode="json")
+
+
+@mcp.tool()
+def get_footprint_placement(session_id: str, reference: str) -> dict[str, object]:
+    """Return the exact position, rotation, layer, lock state, and bounds of a footprint."""
+    return pcb_design.footprint(session_id, reference).model_dump(mode="json")
+
+
+@mcp.tool()
+def analyze_placement(session_id: str) -> dict[str, object]:
+    """Score placement and report deterministic overlap and Edge.Cuts violations."""
+    return pcb_design.analyze_placement(session_id).model_dump(mode="json")
+
+
+@mcp.tool()
+def propose_component_placement(session_id: str, request: dict[str, object]) -> dict[str, object]:
+    """Propose deterministic collision-free placement operations inside typed bounds."""
+    normalized = PlacementRequest.model_validate(request)
+    return pcb_design.propose(session_id, normalized).model_dump(mode="json")
+
+
+@mcp.tool()
+def prepare_placement_change(
+    session_id: str, operations: list[dict[str, object]]
+) -> dict[str, object]:
+    """Apply typed placement operations to a private copy, export PDF, and run DRC."""
+    normalized = tuple(TypeAdapter(list[PlacementOperation]).validate_python(operations))
+    return pcb_design.prepare(session_id, normalized).model_dump(mode="json")
+
+
+@mcp.tool()
+def validate_placement_change(change_set_id: str) -> dict[str, object]:
+    """Reparse and rerun DRC against a prepared placement workspace."""
+    validation, drc = pcb_design.validate(change_set_id)
+    return {
+        "validation": validation.model_dump(mode="json"),
+        "drc": drc.model_dump(mode="json"),
+    }
+
+
+@mcp.tool()
+def apply_placement_change(
+    change_set_id: str, confirmed: bool, editor_closed: bool
+) -> dict[str, object]:
+    """Atomically apply a validated placement after confirmation and stale checks."""
+    return pcb_design.apply(
+        change_set_id, confirmed=confirmed, editor_closed=editor_closed
+    ).model_dump(mode="json")
+
+
+@mcp.tool()
+def rollback_placement_change(
+    change_set_id: str, confirmed: bool, editor_closed: bool
+) -> dict[str, object]:
+    """Restore the byte-exact PCB snapshot after explicit confirmation."""
+    return pcb_design.rollback(
+        change_set_id, confirmed=confirmed, editor_closed=editor_closed
+    ).model_dump(mode="json")
+
+
+@mcp.tool()
+def export_pcb_preview(session_id: str) -> dict[str, object]:
+    """Export a read-only PCB PDF below copperbrain-output/previews/."""
+    return {"preview_pdf": str(pcb_design.export_preview(session_id))}
+
+
+@mcp.tool()
+def get_routing_backend_status() -> dict[str, object]:
+    """Report local Java, FreeRouting JAR, and KiCad Python bridge availability."""
+    return pcb_routing.backend_status().model_dump(mode="json")
+
+
+@mcp.tool()
+def analyze_unrouted_nets(session_id: str, net_names: list[str] | None = None) -> dict[str, object]:
+    """Find electrically disconnected pad groups from typed PCB geometry."""
+    return pcb_routing.analyze(session_id, tuple(net_names or [])).model_dump(mode="json")
+
+
+@mcp.tool()
+def propose_pcb_routing(session_id: str, request: dict[str, object]) -> dict[str, object]:
+    """Propose deterministic, netclass-aware track and via operations for open connections."""
+    normalized = RoutingRequest.model_validate(request)
+    return pcb_routing.propose(session_id, normalized).model_dump(mode="json")
+
+
+@mcp.tool()
+def prepare_routing_change(session_id: str, plan: dict[str, object]) -> dict[str, object]:
+    """Route a private PCB copy, publish a preview, and run comparative DRC."""
+    normalized = RoutingPlan.model_validate(plan)
+    return pcb_routing.prepare(session_id, normalized).model_dump(mode="json")
+
+
+@mcp.tool()
+def validate_routing_change(change_set_id: str) -> dict[str, object]:
+    """Reparse connectivity and rerun DRC against a prepared routing workspace."""
+    validation, drc, analysis = pcb_routing.validate(change_set_id)
+    return {
+        "validation": validation.model_dump(mode="json"),
+        "drc": drc.model_dump(mode="json"),
+        "routing_analysis": analysis.model_dump(mode="json"),
+    }
+
+
+@mcp.tool()
+def apply_routing_change(
+    change_set_id: str, confirmed: bool, editor_closed: bool
+) -> dict[str, object]:
+    """Atomically apply validated tracks and vias after explicit confirmation."""
+    return pcb_routing.apply(
+        change_set_id, confirmed=confirmed, editor_closed=editor_closed
+    ).model_dump(mode="json")
+
+
+@mcp.tool()
+def rollback_routing_change(
+    change_set_id: str, confirmed: bool, editor_closed: bool
+) -> dict[str, object]:
+    """Restore the byte-exact PCB snapshot after explicit confirmation."""
+    return pcb_routing.rollback(
+        change_set_id, confirmed=confirmed, editor_closed=editor_closed
+    ).model_dump(mode="json")
+
+
+@mcp.tool()
+def restore_routing_snapshot(
+    session_id: str,
+    snapshot_id: str,
+    confirmed: bool,
+    editor_closed: bool,
+) -> dict[str, object]:
+    """Restore a private PCB routing snapshot after explicit confirmation."""
+    return pcb_routing.restore_snapshot(
+        session_id,
+        snapshot_id,
+        confirmed=confirmed,
+        editor_closed=editor_closed,
+    ).model_dump(mode="json")
+
+
+@mcp.tool()
+def get_routing_change_summary(change_set_id: str) -> dict[str, object]:
+    """Resume a routing change if needed and return compact review evidence."""
+    return pcb_routing.review(change_set_id).model_dump(mode="json")
+
+
+@mcp.tool()
+def assess_pcb_readiness(session_id: str) -> dict[str, object]:
+    """Separate electrical validation from unassessed production engineering gates."""
+    return pcb_finalization.assess(session_id).model_dump(mode="json")
+
+
+@mcp.tool()
+def prepare_pcb_finalization(
+    session_id: str, routing_request: dict[str, object]
+) -> dict[str, object]:
+    """Prepare and persist a routed PCB preview with a compact readiness report."""
+    request = RoutingRequest.model_validate(routing_request)
+    return pcb_finalization.prepare(session_id, request).model_dump(mode="json")
+
+
+@mcp.tool()
+def validate_pcb_finalization(change_set_id: str) -> dict[str, object]:
+    """Revalidate a persisted PCB finalization change after any MCP restart."""
+    return pcb_finalization.validate(change_set_id).model_dump(mode="json")
+
+
+@mcp.tool()
+def apply_pcb_finalization(
+    change_set_id: str,
+    confirmed: bool,
+    editor_closed: bool,
+) -> dict[str, object]:
+    """Apply final routing after explicit confirmation, then return readiness evidence."""
+    return pcb_finalization.apply(
+        change_set_id, confirmed=confirmed, editor_closed=editor_closed
+    ).model_dump(mode="json")
+
+
+@mcp.tool()
+def get_pcb_finalization_report(change_set_id: str) -> dict[str, object]:
+    """Return the current compact report for a persisted finalization change."""
+    return pcb_finalization.report(change_set_id).model_dump(mode="json")
+
+
+@mcp.tool()
+def prepare_pcb_layout_change(session_id: str, plan: dict[str, object]) -> dict[str, object]:
+    """Headlessly build a typed, unrouted PCB preview from the project schematic."""
+    normalized = PcbLayoutPlan.model_validate(plan)
+    return pcb_layout.prepare(session_id, normalized).model_dump(mode="json")
+
+
+@mcp.tool()
+def validate_pcb_layout_change(change_set_id: str) -> dict[str, object]:
+    """Revalidate schematic, PCB, ERC, DRC, and placement in a prepared workspace."""
+    validation, erc, drc, analysis = pcb_layout.validate(change_set_id)
+    return {
+        "validation": validation.model_dump(mode="json"),
+        "erc": erc.model_dump(mode="json"),
+        "drc": drc.model_dump(mode="json"),
+        "placement_analysis": analysis.model_dump(mode="json"),
+    }
+
+
+@mcp.tool()
+def apply_pcb_layout_change(
+    change_set_id: str, confirmed: bool, editor_closed: bool
+) -> dict[str, object]:
+    """Atomically apply a validated PCB layout after explicit confirmation."""
+    return pcb_layout.apply(
+        change_set_id, confirmed=confirmed, editor_closed=editor_closed
+    ).model_dump(mode="json")
+
+
+@mcp.tool()
+def rollback_pcb_layout_change(
+    change_set_id: str, confirmed: bool, editor_closed: bool
+) -> dict[str, object]:
+    """Restore schematic and PCB snapshots for an applied layout change."""
+    return pcb_layout.rollback(
         change_set_id, confirmed=confirmed, editor_closed=editor_closed
     ).model_dump(mode="json")
 

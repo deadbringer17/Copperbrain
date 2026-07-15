@@ -35,6 +35,29 @@ def _run(command: list[str], *, timeout: float = 60) -> subprocess.CompletedProc
     )
 
 
+def upgrade_pcb(cli: Path | None, pcb: Path) -> None:
+    """Initialize or normalize one temporary PCB through a fixed KiCad command."""
+    if cli is None or not cli.is_file():
+        raise CopperbrainError(
+            ErrorCode.INTEGRATION_UNAVAILABLE,
+            "KiCad CLI is required to initialize the PCB",
+        )
+    try:
+        result = _run([str(cli), "pcb", "upgrade", "--force", str(pcb)])
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise CopperbrainError(
+            ErrorCode.INTEGRATION_UNAVAILABLE,
+            "KiCad could not initialize the PCB",
+            details={"reason": str(exc)},
+        ) from exc
+    if result.returncode != 0:
+        raise CopperbrainError(
+            ErrorCode.VALIDATION_FAILED,
+            "KiCad rejected the generated PCB",
+            details={"reason": result.stderr.strip() or result.stdout.strip()},
+        )
+
+
 def _text(parent: ET.Element, path: str, default: str = "") -> str:
     node = parent.find(path)
     return node.text.strip() if node is not None and node.text else default
@@ -351,6 +374,47 @@ def export_schematic_pdf(cli: Path | None, schematic: Path, destination: Path) -
             raise CopperbrainError(
                 ErrorCode.VALIDATION_FAILED,
                 "KiCad could not export the schematic preview PDF",
+                details={"reason": result.stderr.strip() or result.stdout.strip()},
+            )
+        os.replace(temporary, destination)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return destination
+
+
+def export_pcb_pdf(cli: Path | None, pcb: Path, destination: Path) -> Path:
+    """Export a PCB PDF atomically with a fixed KiCad CLI command."""
+    if cli is None or not cli.is_file():
+        raise CopperbrainError(
+            ErrorCode.INTEGRATION_UNAVAILABLE,
+            "KiCad CLI is unavailable for PCB PDF export",
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.stem}.", suffix=".pdf", dir=destination.parent
+    )
+    os.close(descriptor)
+    os.unlink(temporary_name)
+    temporary = Path(temporary_name)
+    try:
+        result = _run(
+            [
+                str(cli),
+                "pcb",
+                "export",
+                "pdf",
+                "--layers",
+                "F.Cu,B.Cu,F.Silkscreen,B.Silkscreen,Edge.Cuts",
+                "--output",
+                str(temporary),
+                str(pcb),
+            ]
+        )
+        if result.returncode != 0 or not temporary.is_file():
+            raise CopperbrainError(
+                ErrorCode.VALIDATION_FAILED,
+                "KiCad could not export the PCB preview PDF",
                 details={"reason": result.stderr.strip() or result.stdout.strip()},
             )
         os.replace(temporary, destination)

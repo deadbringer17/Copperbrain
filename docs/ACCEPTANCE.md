@@ -6,9 +6,10 @@ KiCad 10, JLCImport, and JLCPCB Tools are all detected and exercised.
 
 | Criterion | Evidence |
 |---|---|
-| Local MCP client can discover the server | `tests/test_server.py` verifies all 19 MVP plus 7 PCB-rule FastMCP tools; `copperbrain` starts stdio only |
+| Local MCP client can discover the server | `tests/test_server.py` verifies all 54 core and approved-extension FastMCP tools; `copperbrain` starts stdio only |
 | KiCad 10.x and both JLC plugins are detected | `tests/adapters/test_kicad_detection.py`; real detection reports KiCad 10, JLCImport, and JLCPCB Tools |
 | Existing project analyzed read-only | `tests/integration/test_kicad_workflow.py` exports a real KiCad 10 netlist without touching the source |
+| History and backup copies excluded | `tests/services/test_projects.py` proves `.history`, `*-backups`, and generated output schematics are never selected as sources |
 | Structured ERC | Real KiCad 10 JSON ERC integration test and normalized unit tests |
 | Search includes price, stock, category | Installed JLCPCB Tools FTS5 integration plus recorded deterministic fixture |
 | Choice is requirement-motivated | Deterministic filter/scoring tests in `tests/services/test_sourcing.py` |
@@ -32,6 +33,56 @@ KiCad 10, JLCImport, and JLCPCB Tools are all detected and exercised.
 | Safe apply and rollback | Confirmation, stale/new-file conflict, atomic apply, byte-exact project restore, and new-rule-file removal tests |
 | Fine-pitch packages remain routable | Geometry adapter and PCB-rule service tests measure pad width/pitch/edge clearance, derive local track and clearance caps, render `intersectsCourtyard`, and preserve the original class outside the package |
 | Missing courtyards remain controlled | Tests prove generated project-local courtyards are preview-only before confirmation, KiCad-validated, hashed, applied atomically, and rolled back byte-for-byte |
+
+## PCB-placement extension evidence
+
+| Criterion | Evidence |
+|---|---|
+| Typed PCB summary and net inspection | `tests/adapters/test_pcb_design_adapter.py` verifies outline, footprint, net, pad, track, via, layer, and routed-length extraction |
+| Deterministic placement analysis/proposal | `tests/services/test_pcb_design.py` verifies overlap/outline scoring, empty-board refusal, stable proposals, spacing, and exact requested references |
+| No arbitrary KiCad syntax enters MCP | Public placement tools accept only Pydantic request and operation models; the adapter tests apply an allowlisted placement |
+| Source remains unchanged before confirmation | Service tests compare live PCB bytes before and after prepare/preview/validation |
+| Project-local PDF preview | Service and transport tests verify output below `copperbrain-output/previews/<id>/` |
+| DRC-gated safe apply | Unit tests verify comparative DRC gates, confirmation, editor state, and stale hash refusal |
+| Byte-exact rollback | Service test applies a placement and restores the original `.kicad_pcb` bytes |
+| Real KiCad compatibility | Integration test moves one footprint in a temporary KiCad 10 demo, runs JSON DRC, and exports a real PDF |
+| Optional official IPC backend | `kicad-python` is locked; adapter status and path verification keep unavailable/running instances explicit |
+
+## Headless PCB-initialization extension evidence
+
+| Criterion | Evidence |
+|---|---|
+| Typed code-only initialization | MCP wrapper tests validate `PcbLayoutPlan`; adapter tests compose a board without GUI automation or raw public KiCad syntax |
+| Complete deterministic plan | Model and adapter tests reject duplicate references, missing schematic components, and populated boards |
+| Electrical and geometric gates | Service runs comparative ERC/DRC, parser validation, and requires placement score 100 before apply |
+| Managed pair-rule safety | Rule adapter tests scope clearance/creepage to different parent footprints, preserve user rules, and prove migration idempotence |
+| Safe preview/apply/rollback | Layout service uses private workspaces, project-local preview, source hashes, confirmation, editor-state checks, snapshots, atomic copies, and rollback |
+| Routing remains excluded | Contracts and adapter generate only footprint placement, rectangular Edge.Cuts, and fixed M3 holes |
+
+## Controlled PCB-routing extension evidence
+
+| Criterion | Evidence |
+|---|---|
+| Typed connectivity and operations | `tests/adapters/test_pcb_routing_adapter.py` verifies open-net detection and allowlisted segment writing |
+| Fixed-command specialized backend | `tests/adapters/test_freerouting.py` verifies Java/JAR/KiCad-Python status, DSN sanitization, bounded arguments, and unavailable-backend refusal |
+| Typed import and KiCad 9/10 compatibility | `tests/adapters/test_pcb_routing_adapter.py` verifies numeric and name-valued copper nets plus allowlisted segment/via extraction |
+| Deterministic candidate evaluation | `tests/services/test_pcb_routing.py` verifies typed deltas, same-stem project-rule DRC context, metrics, and stable ranking |
+| Source remains unchanged before confirmation | Routing service test compares live PCB bytes through proposal, prepare, and validation |
+| Connectivity and comparative DRC gate | Service validation requires selected nets complete and rejects new DRC errors |
+| Confirmation, editor, and stale checks | Service tests cover missing confirmation and stale source refusal; shared workflow rejects lock files |
+| Byte-exact rollback | Service test applies routing and restores the original `.kicad_pcb` bytes |
+| Public MCP contract | `tests/test_server.py` checks all eight routing wrappers, including snapshot recovery, and request/plan validation |
+
+## Routing hardening and finalization evidence
+
+| Criterion | Evidence |
+|---|---|
+| Restart-safe routing lifecycle | `tests/services/test_pcb_routing.py` prepares, validates, applies, and rolls back through fresh service instances using the persisted manifest |
+| Autorouter loop containment | `tests/adapters/test_freerouting.py` proves the watchdog stops the known normalization-loop signature and returns structured evidence |
+| Safe incremental-routing default | Routing service regression rejects pre-existing copper unless the caller explicitly selects `preserve` |
+| Output copies never become sources | Project/output tests reject opening or publishing recursively below `copperbrain-output/` |
+| Honest production-readiness state | `tests/services/test_pcb_finalization.py` proves clean electrical checks remain `production_ready=false` while engineering/DFM gates are unassessed |
+| Compact MCP orchestration | `tests/test_server.py` covers summary, readiness, prepare/validate/apply finalization, and persisted report wrappers |
 
 ## Validation gate
 

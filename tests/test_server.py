@@ -57,6 +57,34 @@ def test_server_exposes_complete_mvp_contract() -> None:
         "validate_pcb_rule_change",
         "apply_pcb_rule_change",
         "rollback_pcb_rule_change",
+        "get_pcb_summary",
+        "inspect_pcb_net",
+        "get_footprint_placement",
+        "analyze_placement",
+        "propose_component_placement",
+        "prepare_placement_change",
+        "validate_placement_change",
+        "apply_placement_change",
+        "rollback_placement_change",
+        "export_pcb_preview",
+        "get_routing_backend_status",
+        "analyze_unrouted_nets",
+        "propose_pcb_routing",
+        "prepare_routing_change",
+        "validate_routing_change",
+        "apply_routing_change",
+        "rollback_routing_change",
+        "restore_routing_snapshot",
+        "get_routing_change_summary",
+        "assess_pcb_readiness",
+        "prepare_pcb_finalization",
+        "validate_pcb_finalization",
+        "apply_pcb_finalization",
+        "get_pcb_finalization_report",
+        "prepare_pcb_layout_change",
+        "validate_pcb_layout_change",
+        "apply_pcb_layout_change",
+        "rollback_pcb_layout_change",
         "search_components",
         "get_component_details",
         "compare_components",
@@ -128,6 +156,132 @@ def test_pcb_rule_transport_wrappers(monkeypatch: pytest.MonkeyPatch) -> None:
     assert server.validate_pcb_rule_change("c")["validation"]["valid"]
     assert server.apply_pcb_rule_change("c", True, True)["ok"]
     assert server.rollback_pcb_rule_change("c", True, True)["ok"]
+
+
+def test_pcb_design_transport_wrappers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server.pcb_design, "summary", lambda session: Dump({"summary": True}))
+    monkeypatch.setattr(server.pcb_design, "inspect_net", lambda session, net: Dump({"net": net}))
+    monkeypatch.setattr(
+        server.pcb_design,
+        "footprint",
+        lambda session, reference: Dump({"reference": reference}),
+    )
+    monkeypatch.setattr(
+        server.pcb_design, "analyze_placement", lambda session: Dump({"score": 100})
+    )
+    monkeypatch.setattr(server.pcb_design, "propose", lambda *args: Dump())
+    monkeypatch.setattr(server.pcb_design, "prepare", lambda *args: Dump())
+    monkeypatch.setattr(
+        server.pcb_design,
+        "validate",
+        lambda change: (ValidationReport(valid=True), DrcReport(available=True)),
+    )
+    monkeypatch.setattr(server.pcb_design, "apply", lambda *args, **kwargs: Dump())
+    monkeypatch.setattr(server.pcb_design, "rollback", lambda *args, **kwargs: Dump())
+    monkeypatch.setattr(server.pcb_design, "export_preview", lambda session: Path("preview.pdf"))
+    assert server.get_pcb_summary("s")["summary"]
+    assert server.inspect_pcb_net("s", "GND")["net"] == "GND"
+    assert server.get_footprint_placement("s", "R1")["reference"] == "R1"
+    assert server.analyze_placement("s")["score"] == 100
+    request = {
+        "references": ["R1"],
+        "region": {"min_x_mm": 0, "min_y_mm": 0, "max_x_mm": 10, "max_y_mm": 10},
+    }
+    assert server.propose_component_placement("s", request)["ok"]
+    operation = {"reference": "R1", "x_mm": 5, "y_mm": 5}
+    assert server.prepare_placement_change("s", [operation])["ok"]
+    assert server.validate_placement_change("c")["validation"]["valid"]
+    assert server.apply_placement_change("c", True, True)["ok"]
+    assert server.rollback_placement_change("c", True, True)["ok"]
+    assert server.export_pcb_preview("s")["preview_pdf"] == "preview.pdf"
+
+
+def test_pcb_layout_transport_wrappers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server.pcb_layout, "prepare", lambda *args: Dump())
+    monkeypatch.setattr(
+        server.pcb_layout,
+        "validate",
+        lambda change: (
+            ValidationReport(valid=True),
+            Dump({"available": True}),
+            DrcReport(available=True),
+            Dump({"score": 100}),
+        ),
+    )
+    monkeypatch.setattr(server.pcb_layout, "apply", lambda *args, **kwargs: Dump())
+    monkeypatch.setattr(server.pcb_layout, "rollback", lambda *args, **kwargs: Dump())
+    plan = {
+        "outline": {"width_mm": 20, "height_mm": 10},
+        "placements": [{"reference": "R1", "x_mm": 85, "y_mm": 85}],
+    }
+    assert server.prepare_pcb_layout_change("s", plan)["ok"]
+    assert server.validate_pcb_layout_change("c")["validation"]["valid"]
+    assert server.apply_pcb_layout_change("c", True, True)["ok"]
+    assert server.rollback_pcb_layout_change("c", True, True)["ok"]
+
+
+def test_pcb_routing_transport_wrappers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server.pcb_routing, "backend_status", lambda: Dump({"available": True}))
+    monkeypatch.setattr(server.pcb_routing, "analyze", lambda *args: Dump({"complete": False}))
+    monkeypatch.setattr(server.pcb_routing, "propose", lambda *args: Dump())
+    monkeypatch.setattr(server.pcb_routing, "prepare", lambda *args: Dump())
+    monkeypatch.setattr(
+        server.pcb_routing,
+        "validate",
+        lambda change: (
+            ValidationReport(valid=True),
+            DrcReport(available=True),
+            Dump({"complete": True}),
+        ),
+    )
+    monkeypatch.setattr(server.pcb_routing, "apply", lambda *args, **kwargs: Dump())
+    monkeypatch.setattr(server.pcb_routing, "rollback", lambda *args, **kwargs: Dump())
+    monkeypatch.setattr(server.pcb_routing, "restore_snapshot", lambda *args, **kwargs: Dump())
+    monkeypatch.setattr(server.pcb_routing, "review", lambda *args: Dump())
+    monkeypatch.setattr(server.pcb_finalization, "assess", lambda *args: Dump())
+    monkeypatch.setattr(server.pcb_finalization, "prepare", lambda *args: Dump())
+    monkeypatch.setattr(server.pcb_finalization, "validate", lambda *args: Dump())
+    monkeypatch.setattr(server.pcb_finalization, "apply", lambda *args, **kwargs: Dump())
+    monkeypatch.setattr(server.pcb_finalization, "report", lambda *args: Dump())
+    assert server.get_routing_backend_status()["available"]
+    assert not server.analyze_unrouted_nets("s")["complete"]
+    request = {"nets": ["GND"], "default_track_width_mm": 0.25}
+    assert server.propose_pcb_routing("s", request)["ok"]
+    plan = {
+        "session_id": "s",
+        "request": request,
+        "segments": [
+            {
+                "net": "GND",
+                "start_x_mm": 1,
+                "start_y_mm": 1,
+                "end_x_mm": 2,
+                "end_y_mm": 1,
+                "width_mm": 0.25,
+            }
+        ],
+        "target_nets": ["GND"],
+        "analysis_before": {
+            "session_id": "s",
+            "complete": False,
+            "net_count": 1,
+            "routed_net_count": 0,
+            "unrouted_net_count": 1,
+            "unrouted_connection_count": 1,
+        },
+        "predicted_complete": True,
+    }
+    assert server.prepare_routing_change("s", plan)["ok"]
+    assert server.validate_routing_change("c")["validation"]["valid"]
+    assert server.apply_routing_change("c", True, True)["ok"]
+    assert server.rollback_routing_change("c", True, True)["ok"]
+    assert server.restore_routing_snapshot("s", "a" * 32, True, True)["ok"]
+    assert server.get_routing_change_summary("c")["ok"]
+    assert server.assess_pcb_readiness("s")["ok"]
+    assert server.prepare_pcb_finalization("s", request)["ok"]
+    assert server.validate_pcb_finalization("c")["ok"]
+    assert server.apply_pcb_finalization("c", True, True)["ok"]
+    assert server.get_pcb_finalization_report("c")["ok"]
 
 
 def test_sourcing_transport_wrappers(monkeypatch: pytest.MonkeyPatch) -> None:

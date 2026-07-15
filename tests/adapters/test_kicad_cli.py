@@ -109,3 +109,26 @@ def test_export_schematic_pdf_is_atomic(monkeypatch: pytest.MonkeyPatch, tmp_pat
 def test_export_schematic_pdf_requires_cli(tmp_path: Path) -> None:
     with pytest.raises(CopperbrainError, match="unavailable"):
         kicad_cli.export_schematic_pdf(None, tmp_path / "x.kicad_sch", tmp_path / "x.pdf")
+
+
+def test_export_pcb_pdf_is_atomic(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cli = tmp_path / "kicad-cli.exe"
+    cli.write_bytes(b"")
+    pcb = tmp_path / "demo.kicad_pcb"
+    pcb.write_text("fixture", encoding="utf-8")
+    destination = tmp_path / "out" / "preview.pdf"
+
+    def run(command: list[str], *, timeout: float = 60) -> subprocess.CompletedProcess[str]:
+        assert command[1:4] == ["pcb", "export", "pdf"]
+        assert command[command.index("--layers") + 1].endswith("Edge.Cuts")
+        Path(command[command.index("--output") + 1]).write_bytes(b"pcb-pdf")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(kicad_cli, "_run", run)
+    assert kicad_cli.export_pcb_pdf(cli, pcb, destination) == destination
+    assert destination.read_bytes() == b"pcb-pdf"
+
+
+def test_export_pcb_pdf_requires_cli(tmp_path: Path) -> None:
+    with pytest.raises(CopperbrainError, match="unavailable"):
+        kicad_cli.export_pcb_pdf(None, tmp_path / "x.kicad_pcb", tmp_path / "x.pdf")

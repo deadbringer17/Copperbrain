@@ -18,7 +18,24 @@ from copperbrain.models import (
     ProjectSession,
     ProjectSummary,
 )
-from copperbrain.services.outputs import OUTPUT_DIRECTORY
+from copperbrain.services.outputs import OUTPUT_DIRECTORY, require_source_project_root
+
+_IGNORED_PROJECT_DIRECTORIES = {OUTPUT_DIRECTORY, ".git", ".history"}
+
+
+def _is_source_schematic(path: Path, root: Path) -> bool:
+    """Reject generated, backup, history, VCS, and editor-lock schematic copies."""
+    relative = path.relative_to(root)
+    if any(
+        part in _IGNORED_PROJECT_DIRECTORIES or part.endswith("-backups")
+        for part in relative.parts[:-1]
+    ):
+        return False
+    return not (
+        path.name.startswith("~")
+        or path.name.endswith(".lck")
+        or (path.name.startswith(".") and path.name.endswith(".lck"))
+    )
 
 
 def hash_file(path: Path) -> str:
@@ -54,6 +71,7 @@ class ProjectService:
     def open_project(self, path: Path) -> ProjectSession:
         """Validate a KiCad project, discover its files, and freeze source hashes."""
         resolved = path.expanduser().resolve()
+        require_source_project_root(resolved if resolved.is_dir() else resolved.parent)
         if resolved.is_dir():
             projects = sorted(resolved.glob("*.kicad_pro"))
             if len(projects) != 1:
@@ -74,11 +92,7 @@ class ProjectService:
             )
         root = project_file.parent
         schematics = tuple(
-            sorted(
-                item
-                for item in root.rglob("*.kicad_sch")
-                if OUTPUT_DIRECTORY not in item.relative_to(root).parts
-            )
+            sorted(item for item in root.rglob("*.kicad_sch") if _is_source_schematic(item, root))
         )
         if not schematics:
             raise CopperbrainError(ErrorCode.NOT_FOUND, "Project contains no .kicad_sch files")

@@ -45,6 +45,31 @@ def test_open_project_ignores_copperbrain_outputs(tmp_path: Path) -> None:
     assert [item.name for item in session.schematic_files] == ["demo.kicad_sch"]
 
 
+def test_open_project_rejects_a_published_preview_as_source(tmp_path: Path) -> None:
+    output = tmp_path / "copperbrain-output" / "previews" / "old"
+    output.mkdir(parents=True)
+    project = make_project(output)
+
+    with pytest.raises(CopperbrainError, match="cannot be used as a source") as caught:
+        projects.ProjectService().open_project(project)
+    assert caught.value.error.actionable_hint is not None
+    assert "original KiCad project" in caught.value.error.actionable_hint
+
+
+def test_open_project_ignores_history_and_backup_schematics(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    history = tmp_path / ".history"
+    backups = tmp_path / "demo-backups"
+    history.mkdir()
+    backups.mkdir()
+    (history / "demo.kicad_sch").write_text("history", encoding="utf-8")
+    (backups / "demo.kicad_sch").write_text("backup", encoding="utf-8")
+
+    session = projects.ProjectService().open_project(project)
+
+    assert session.schematic_files == (tmp_path / "demo.kicad_sch",)
+
+
 def test_open_project_rejects_invalid_directory(tmp_path: Path) -> None:
     with pytest.raises(CopperbrainError, match="exactly one"):
         projects.ProjectService().open_project(tmp_path)
