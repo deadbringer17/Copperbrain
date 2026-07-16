@@ -7,6 +7,8 @@ import os
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from copperbrain.errors import CopperbrainError
@@ -33,6 +35,31 @@ def _run(command: list[str], *, timeout: float = 60) -> subprocess.CompletedProc
         timeout=timeout,
         check=False,
     )
+
+
+@contextmanager
+def _preserve_project_local_state(source: Path) -> Iterator[None]:
+    """Undo KiCad CLI's incidental same-stem local-preference write."""
+    local_state = source.with_suffix(".kicad_prl")
+    original = local_state.read_bytes() if local_state.is_file() else None
+    try:
+        yield
+    finally:
+        if original is None:
+            local_state.unlink(missing_ok=True)
+        elif not local_state.is_file() or local_state.read_bytes() != original:
+            descriptor, temporary = tempfile.mkstemp(
+                prefix=f".{local_state.name}.", dir=local_state.parent
+            )
+            try:
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(original)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, local_state)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
 
 
 def upgrade_pcb(cli: Path | None, pcb: Path) -> None:
@@ -109,19 +136,20 @@ def export_netlist(cli: Path, schematic: Path) -> tuple[tuple[Component, ...], t
     """Export and parse a temporary XML netlist using fixed CLI arguments."""
     with tempfile.TemporaryDirectory(prefix="copperbrain-netlist-") as directory:
         output = Path(directory) / "netlist.xml"
-        result = _run(
-            [
-                str(cli),
-                "sch",
-                "export",
-                "netlist",
-                "--format",
-                "kicadxml",
-                "--output",
-                str(output),
-                str(schematic),
-            ]
-        )
+        with _preserve_project_local_state(schematic):
+            result = _run(
+                [
+                    str(cli),
+                    "sch",
+                    "export",
+                    "netlist",
+                    "--format",
+                    "kicadxml",
+                    "--output",
+                    str(output),
+                    str(schematic),
+                ]
+            )
         if result.returncode != 0 or not output.is_file():
             raise RuntimeError(
                 result.stderr.strip() or result.stdout.strip() or "netlist export failed"
@@ -181,18 +209,19 @@ def run_erc(cli: Path | None, schematic: Path) -> ErcReport:
     with tempfile.TemporaryDirectory(prefix="copperbrain-erc-") as directory:
         output = Path(directory) / "erc.json"
         try:
-            result = _run(
-                [
-                    str(cli),
-                    "sch",
-                    "erc",
-                    "--format",
-                    "json",
-                    "--output",
-                    str(output),
-                    str(schematic),
-                ]
-            )
+            with _preserve_project_local_state(schematic):
+                result = _run(
+                    [
+                        str(cli),
+                        "sch",
+                        "erc",
+                        "--format",
+                        "json",
+                        "--output",
+                        str(output),
+                        str(schematic),
+                    ]
+                )
         except (OSError, subprocess.TimeoutExpired) as exc:
             return ErcReport(
                 available=False,
@@ -264,18 +293,19 @@ def run_drc(cli: Path | None, pcb: Path | None) -> DrcReport:
     with tempfile.TemporaryDirectory(prefix="copperbrain-drc-") as directory:
         output = Path(directory) / "drc.json"
         try:
-            result = _run(
-                [
-                    str(cli),
-                    "pcb",
-                    "drc",
-                    "--format",
-                    "json",
-                    "--output",
-                    str(output),
-                    str(pcb),
-                ]
-            )
+            with _preserve_project_local_state(pcb):
+                result = _run(
+                    [
+                        str(cli),
+                        "pcb",
+                        "drc",
+                        "--format",
+                        "json",
+                        "--output",
+                        str(output),
+                        str(pcb),
+                    ]
+                )
         except (OSError, subprocess.TimeoutExpired) as exc:
             return DrcReport(
                 available=False,
@@ -359,17 +389,18 @@ def export_schematic_pdf(cli: Path | None, schematic: Path, destination: Path) -
     os.unlink(temporary_name)
     temporary = Path(temporary_name)
     try:
-        result = _run(
-            [
-                str(cli),
-                "sch",
-                "export",
-                "pdf",
-                "--output",
-                str(temporary),
-                str(schematic),
-            ]
-        )
+        with _preserve_project_local_state(schematic):
+            result = _run(
+                [
+                    str(cli),
+                    "sch",
+                    "export",
+                    "pdf",
+                    "--output",
+                    str(temporary),
+                    str(schematic),
+                ]
+            )
         if result.returncode != 0 or not temporary.is_file():
             raise CopperbrainError(
                 ErrorCode.VALIDATION_FAILED,
@@ -398,19 +429,20 @@ def export_pcb_pdf(cli: Path | None, pcb: Path, destination: Path) -> Path:
     os.unlink(temporary_name)
     temporary = Path(temporary_name)
     try:
-        result = _run(
-            [
-                str(cli),
-                "pcb",
-                "export",
-                "pdf",
-                "--layers",
-                "F.Cu,B.Cu,F.Silkscreen,B.Silkscreen,Edge.Cuts",
-                "--output",
-                str(temporary),
-                str(pcb),
-            ]
-        )
+        with _preserve_project_local_state(pcb):
+            result = _run(
+                [
+                    str(cli),
+                    "pcb",
+                    "export",
+                    "pdf",
+                    "--layers",
+                    "F.Cu,B.Cu,F.Silkscreen,B.Silkscreen,Edge.Cuts",
+                    "--output",
+                    str(temporary),
+                    str(pcb),
+                ]
+            )
         if result.returncode != 0 or not temporary.is_file():
             raise CopperbrainError(
                 ErrorCode.VALIDATION_FAILED,

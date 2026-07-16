@@ -125,7 +125,19 @@ def _local_footprint_bounds(node: list[object]) -> tuple[float, float, float, fl
             continue
         child_name = _name(child[0])
         if child_name.startswith("fp_"):
-            points = _graphic_points(child)
+            if child_name == "fp_circle":
+                center = _xy(_first(child, "center"))
+                end = _xy(_first(child, "end"))
+                if center is not None and end is not None:
+                    radius = math.dist(center, end)
+                    points = [
+                        (center[0] - radius, center[1] - radius),
+                        (center[0] + radius, center[1] + radius),
+                    ]
+                else:
+                    points = _graphic_points(child)
+            else:
+                points = _graphic_points(child)
             general.extend(points)
             if _layer(child) in {"F.CrtYd", "B.CrtYd"}:
                 courtyard.extend(points)
@@ -257,6 +269,18 @@ class PcbFileAdapter:
             rotation = _number(at[3]) if len(at) > 3 else 0
             local = _local_footprint_bounds(node)
             layer = _layer(node)
+            pad_kinds = {_name(pad[2]) for pad in _forms(node, "pad") if len(pad) > 2}
+            has_smd = "smd" in pad_kinds
+            has_through_hole = bool({"thru_hole", "np_thru_hole"} & pad_kinds)
+            mount_type = (
+                "mixed"
+                if has_smd and has_through_hole
+                else "through_hole"
+                if has_through_hole
+                else "smd"
+                if has_smd
+                else "unknown"
+            )
             footprints.append(
                 PcbFootprintPlacement(
                     reference=reference,
@@ -266,10 +290,17 @@ class PcbFileAdapter:
                     y_mm=y,
                     rotation_deg=rotation,
                     layer=layer if layer in {"F.Cu", "B.Cu"} else "F.Cu",  # type: ignore[arg-type]
+                    mount_type=mount_type,  # type: ignore[arg-type]
                     locked=any(
                         _name(item) == "locked" for item in node if not isinstance(item, list)
                     ),
                     bounds=_absolute_bounds(local, x, y, rotation),
+                    local_bounds=PcbBounds(
+                        min_x_mm=local[0],
+                        min_y_mm=local[1],
+                        max_x_mm=local[2],
+                        max_y_mm=local[3],
+                    ),
                 )
             )
             for pad in _forms(node, "pad"):

@@ -180,6 +180,7 @@ class ChangeOperation(FrozenModel):
         "connect",
         "label",
         "no_connect",
+        "set_paper_size",
     ]
     target: str
     parameters: dict[str, str | int | float | bool] = Field(default_factory=dict)
@@ -198,6 +199,37 @@ class ChangeStatus(StrEnum):
     APPLIED = "applied"
     ROLLED_BACK = "rolled_back"
     STALE = "stale"
+
+
+class ProjectCreationSpec(FrozenModel):
+    """Bounded empty-project creation request."""
+
+    name: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
+    copper_layers: Literal[2, 4] = 2
+
+
+class ProjectCreationChangeSet(FrozenModel):
+    """Review evidence for creating a new project root."""
+
+    id: str
+    spec: ProjectCreationSpec
+    target_root: Path
+    affected_files: tuple[Path, ...]
+    semantic_diff: tuple[str, ...]
+    risks: tuple[str, ...]
+    validation_report: ValidationReport
+    preview_directory: Path
+    status: ChangeStatus = ChangeStatus.PREPARED
+    applied_hashes: dict[str, str] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class ProjectCreationRecord(FrozenModel):
+    """Private restart-safe envelope for an empty-project creation."""
+
+    schema_version: Literal[1] = 1
+    workspace: Path
+    change_set: ProjectCreationChangeSet
 
 
 class ChangeSet(FrozenModel):
@@ -445,8 +477,10 @@ class PcbFootprintPlacement(FrozenModel):
     y_mm: float
     rotation_deg: float = 0
     layer: Literal["F.Cu", "B.Cu"]
+    mount_type: Literal["smd", "through_hole", "mixed", "unknown"] = "unknown"
     locked: bool = False
     bounds: PcbBounds
+    local_bounds: PcbBounds | None = None
 
 
 class PcbSummary(FrozenModel):
@@ -592,7 +626,7 @@ class RoutingCandidateEvaluation(FrozenModel):
 class RoutingBackendStatus(FrozenModel):
     """Availability of the fixed-command local PCB autorouting backend."""
 
-    name: Literal["FreeRouting"] = "FreeRouting"
+    name: Literal["FreeRouting", "Copperbrain two-layer orthogonal router"] = "FreeRouting"
     available: bool
     version: str | None = None
     java_major_version: Annotated[int, Field(ge=1)] | None = None
@@ -710,6 +744,12 @@ class PlacementAnalysis(FrozenModel):
     overlap_pairs: tuple[tuple[str, str], ...] = ()
     outside_board: tuple[str, ...] = ()
     footprint_count: Annotated[int, Field(ge=0)] = 0
+    estimated_wire_length_mm: Annotated[float, Field(ge=0)] = 0
+    placement_area_mm2: Annotated[float, Field(ge=0)] = 0
+    compactness_percent: Annotated[float, Field(ge=0, le=100)] = 0
+    cross_layer_net_count: Annotated[int, Field(ge=0)] = 0
+    top_footprint_count: Annotated[int, Field(ge=0)] = 0
+    bottom_footprint_count: Annotated[int, Field(ge=0)] = 0
     assumptions: tuple[str, ...] = ()
 
 
@@ -748,8 +788,12 @@ class PlacementRequest(FrozenModel):
     strategy: Literal["grid", "compact"] = "compact"
     region: PcbBounds | None = None
     spacing_mm: Annotated[float, Field(ge=0)] = 1.0
+    routing_corridor_mm: Annotated[float, Field(ge=0)] = 0.8
+    power_corridor_mm: Annotated[float, Field(ge=0)] = 2.0
     grid_mm: Annotated[float, Field(gt=0)] = 0.5
     rotation_deg: float = 0
+    rotation_policy: Literal["fixed", "orthogonal_auto"] = "orthogonal_auto"
+    layer_policy: Literal["preserve", "auto", "front", "back"] = "auto"
 
     @field_validator("references")
     @classmethod

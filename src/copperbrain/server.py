@@ -27,6 +27,7 @@ from copperbrain.models import (
     PcbRuleSet,
     PlacementOperation,
     PlacementRequest,
+    ProjectCreationSpec,
     RequirementSet,
     RoutingPlan,
     RoutingRequest,
@@ -42,6 +43,7 @@ from copperbrain.services.pcb_finalization import PcbFinalizationService
 from copperbrain.services.pcb_layout import PcbLayoutService
 from copperbrain.services.pcb_routing import PcbRoutingService
 from copperbrain.services.pcb_rules import PcbRuleService
+from copperbrain.services.project_creation import ProjectCreationService
 from copperbrain.services.projects import ProjectService
 from copperbrain.services.sourcing import (
     CatalogCache,
@@ -54,6 +56,7 @@ from copperbrain.services.sourcing import (
 mcp = FastMCP("Copperbrain")
 settings = Settings.from_environment()
 projects = ProjectService()
+project_creation = ProjectCreationService(settings.data_dir)
 assets = AssetService()
 sourcing = SourcingService(
     configured_catalog(), CatalogCache(settings.cache_dir / "catalog.sqlite")
@@ -108,6 +111,31 @@ def _resolve_asset(value: str, kind: str) -> Path:
 def detect_kicad() -> dict[str, object]:
     """Detect KiCad versions, CLI paths, user data directories, and JLC plugins."""
     return detect_kicad_service().model_dump(mode="json")
+
+
+@mcp.tool()
+def prepare_project_creation(parent: str, spec: dict[str, object]) -> dict[str, object]:
+    """Create and validate a private empty-project preview without applying source files."""
+    normalized = ProjectCreationSpec.model_validate(spec)
+    return project_creation.prepare(Path(parent), normalized).model_dump(mode="json")
+
+
+@mcp.tool()
+def validate_project_creation(change_set_id: str) -> dict[str, object]:
+    """Revalidate an empty-project scaffold in its private workspace."""
+    return project_creation.validate(change_set_id).model_dump(mode="json")
+
+
+@mcp.tool()
+def apply_project_creation(change_set_id: str, confirmed: bool) -> dict[str, object]:
+    """Atomically create project source files after explicit confirmation."""
+    return project_creation.apply(change_set_id, confirmed=confirmed).model_dump(mode="json")
+
+
+@mcp.tool()
+def rollback_project_creation(change_set_id: str, confirmed: bool) -> dict[str, object]:
+    """Remove unchanged source files created by a confirmed project change set."""
+    return project_creation.rollback(change_set_id, confirmed=confirmed).model_dump(mode="json")
 
 
 @mcp.tool()
@@ -230,13 +258,13 @@ def get_footprint_placement(session_id: str, reference: str) -> dict[str, object
 
 @mcp.tool()
 def analyze_placement(session_id: str) -> dict[str, object]:
-    """Score placement and report deterministic overlap and Edge.Cuts violations."""
+    """Report placement safety, ratsnest, envelope, compactness, and side metrics."""
     return pcb_design.analyze_placement(session_id).model_dump(mode="json")
 
 
 @mcp.tool()
 def propose_component_placement(session_id: str, request: dict[str, object]) -> dict[str, object]:
-    """Propose deterministic collision-free placement operations inside typed bounds."""
+    """Propose connectivity-aware compact positions, rotations, and guarded PCB sides."""
     normalized = PlacementRequest.model_validate(request)
     return pcb_design.propose(session_id, normalized).model_dump(mode="json")
 

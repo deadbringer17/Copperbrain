@@ -21,6 +21,13 @@ Run the stdio MCP server with `uv run copperbrain`.
 
 Run the non-destructive offline demo with `uv run python scripts/run_demo.py`.
 
+To start a new design safely, call `prepare_project_creation` with an existing parent directory
+and a typed name/layer count. Copperbrain creates the schematic through `kicad-sch-api`, creates
+the empty board through KiCad's bundled Python API, validates both files, and publishes only a
+preview under `<new-project>/copperbrain-output/previews/<change-set-id>/`.
+`apply_project_creation` requires explicit confirmation before the three source files appear;
+`rollback_project_creation` removes them only while their post-apply hashes still match.
+
 For an opened KiCad project, Copperbrain writes every deliverable artifact below
 `<project>/copperbrain-output/`: prepared project/PDF previews under `previews/` and BOM exports
 under `bom/`. Private mutation workspaces, caches, and rollback snapshots are not placed in the
@@ -55,9 +62,12 @@ packages narrower than the fabrication minimum produce a safe refusal.
 ## PCB inspection and placement via MCP
 
 Use `get_pcb_summary`, `inspect_pcb_net`, and `get_footprint_placement` for typed board queries.
-`analyze_placement` reports conservative courtyard overlaps and footprints outside the detected
-Edge.Cuts extent. `propose_component_placement` accepts exact references, a typed optional region,
-spacing/grid limits, and a deterministic `compact` or `grid` strategy.
+`analyze_placement` reports conservative courtyard overlaps, footprints outside Edge.Cuts,
+estimated ratsnest length, occupied envelope, compactness, side counts, and cross-layer nets.
+`propose_component_placement` accepts exact references, a typed optional region, spacing/grid and
+routing-corridor limits, plus deterministic `compact` or `grid`, rotation, and layer policies.
+Compact placement scores pad connectivity and envelope growth, keeps connectors near edges, and
+allows automatic bottom placement only for small SMD passives.
 
 Pass the returned operations to `prepare_placement_change`. Copperbrain changes only a private
 project copy, exports `Copperbrain-PCB-preview.pdf`, runs comparative DRC, and publishes the copy
@@ -70,13 +80,15 @@ transactions. PCB inspection and safe preview do not require a running editor: t
 adapter and `kicad-cli` remain the deterministic offline path. No MCP placement tool accepts raw
 KiCad S-expressions, and this extension does not route traces or modify zones, keepouts, or the
 board outline.
-Move e rotazione restano sul lato corrente del footprint; un cambio `F.Cu`/`B.Cu` viene rifiutato
-esplicitamente e deve essere eseguito e revisionato in KiCad.
+Un cambio `F.Cu`/`B.Cu` viene eseguito soltanto nella copia temporanea attraverso l'API `pcbnew`
+inclusa in KiCad, cosi pad, grafica, testi e modelli 3D vengono trasformati insieme. Preview, DRC,
+conferma esplicita, snapshot e rollback restano obbligatori.
 
 ## Headless PCB initialization via MCP
 
 For an empty board, `prepare_pcb_layout_change` accepts a typed rectangular outline, one placement
-for every schematic component, optional fixed M3 mounting holes, and explicit footprint overrides.
+for every physical schematic footprint, optional fixed M3 mounting holes, and explicit footprint
+overrides. Nonphysical power symbols are excluded from the placement requirement.
 It synchronizes footprints in a private copy, builds the unrouted PCB through the adapter, runs
 comparative ERC/DRC and placement analysis, and publishes a PDF/project preview below
 `copperbrain-output/previews/<change-set-id>/`.
@@ -84,6 +96,13 @@ comparative ERC/DRC and placement analysis, and publishes a PDF/project preview 
 Use `validate_pcb_layout_change` to repeat all gates. `apply_pcb_layout_change` requires explicit
 confirmation and a closed editor; `rollback_pcb_layout_change` restores the snapshot. These tools
 do not autoroute or generate tracks, copper zones, keepouts, or manufacturing outputs.
+
+The bounded `test_bench_pico` reference helper demonstrates this flow for a provisional 12 V,
+20 A brushed-DC H-bridge using DRV8701, four external 60 V MOSFETs, ATtiny1616, half-duplex
+RS-485, and four protected 5–24 V digital sensor inputs. Its typed plan uses a compact 120 x 100 mm board,
+four M3 holes, a star-separated `PGND`/logic `GND`, and a 70 um external-copper assumption. It is
+a review benchmark, not a production-qualified design; high-current zones, thermal/EMC/DFM,
+motor stall behavior, and the final stackup still require engineering validation.
 
 ## Controlled PCB routing via MCP
 

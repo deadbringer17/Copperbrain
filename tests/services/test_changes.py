@@ -127,3 +127,26 @@ def test_prepare_rejects_new_erc_errors(tmp_path: Path) -> None:
     assert not change.validation_report.checks["erc_no_new_errors"]
     with pytest.raises(CopperbrainError, match="not validated"):
         service.apply(change.id, confirmed=True, editor_closed=True)
+
+
+def test_prepare_rejects_new_multiple_net_name_warning(tmp_path: Path) -> None:
+    service, _, session = setup(tmp_path)
+
+    def erc(path: Path) -> ErcReport:
+        violations = ()
+        if path.read_text(encoding="utf-8") == "changed":
+            violations = (
+                ErcViolation(
+                    severity="warning",
+                    code="multiple_net_names",
+                    message="two labels share one electrical item",
+                ),
+            )
+        return ErcReport(available=True, violations=violations)
+
+    service.erc_runner = erc
+    change = service.prepare(session, (operation(),))
+
+    assert change.status is ChangeStatus.PREPARED
+    assert not change.validation_report.checks["erc_no_new_errors"]
+    assert any("multiple_net_names" in message for message in change.validation_report.messages)

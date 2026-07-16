@@ -82,18 +82,24 @@ class ChangeService:
         parser_report = self.adapter.validate(temporary_schematic)
         before = self.erc_runner(session.schematic_files[0])
         after = self.erc_runner(temporary_schematic)
+
+        def blocking(violation: object) -> bool:
+            severity = getattr(violation, "severity", None)
+            code = getattr(violation, "code", None)
+            return severity == "error" or code == "multiple_net_names"
+
         baseline = Counter(
-            (item.code, item.message) for item in before.violations if item.severity == "error"
+            (item.code, item.message) for item in before.violations if blocking(item)
         )
         generated = Counter(
-            (item.code, item.message) for item in after.violations if item.severity == "error"
+            (item.code, item.message) for item in after.violations if blocking(item)
         )
         new_errors = generated - baseline
         erc_available = after.available and after.error is None
         erc_regression_free = not new_errors
         messages = list(parser_report.messages)
         messages.extend(
-            f"New ERC error: {code or 'unknown'}: {message} (x{count})"
+            f"New blocking ERC violation: {code or 'unknown'}: {message} (x{count})"
             for (code, message), count in new_errors.items()
         )
         return ValidationReport(

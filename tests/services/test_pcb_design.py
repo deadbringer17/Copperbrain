@@ -71,6 +71,12 @@ def test_queries_analysis_and_deterministic_proposal(
     )
     assert [item.reference for item in proposal.operations] == ["R1", "C1"]
     assert proposal.analysis_after.score == 100
+    assert (
+        proposal.analysis_after.estimated_wire_length_mm
+        < proposal.analysis_before.estimated_wire_length_mm
+    )
+    assert proposal.analysis_after.placement_area_mm2 < proposal.analysis_before.placement_area_mm2
+    assert {item.rotation_deg for item in proposal.operations} != {0}
     assert proposal.operations == service.propose(session, proposal.request).operations
 
 

@@ -56,6 +56,28 @@ def test_kicad_10_name_only_nets_are_resolved(tmp_path: Path) -> None:
     assert net.via_count == 1
 
 
+def test_circle_courtyard_contributes_full_radius_to_local_bounds(tmp_path: Path) -> None:
+    pcb = tmp_path / "circle-courtyard.kicad_pcb"
+    pcb.write_text(
+        """(kicad_pcb (version 20240108) (generator pcbnew)
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (footprint "Test:Radial" (layer "F.Cu") (at 10 10)
+    (property "Reference" "C1" (at 0 0) (layer "F.SilkS"))
+    (fp_circle (center 2.5 0) (end 9 0)
+      (stroke (width 0.05) (type solid)) (fill none) (layer "F.CrtYd"))
+    (pad "1" thru_hole circle (at 0 0) (size 2 2) (drill 1) (layers "*.Cu" "*.Mask")))
+  (gr_rect (start 0 0) (end 20 20) (stroke (width 0.05) (type default))
+    (fill none) (layer "Edge.Cuts")))""",
+        encoding="utf-8",
+    )
+    footprint = PcbFileAdapter().summary(pcb, "session").footprints[0]
+    assert footprint.local_bounds is not None
+    assert footprint.local_bounds.min_x_mm == -4
+    assert footprint.local_bounds.max_x_mm == 9
+    assert footprint.local_bounds.min_y_mm == -6.5
+    assert footprint.local_bounds.max_y_mm == 6.5
+
+
 def test_ipc_board_path_uses_project_directory(tmp_path: Path) -> None:
     class Project:
         path = str(tmp_path)

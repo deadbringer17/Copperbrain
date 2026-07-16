@@ -141,6 +141,15 @@ class SchematicApiAdapter:
                         },
                     )
                 schematic.no_connects.add(pin_position)
+            elif operation.kind == "set_paper_size":
+                paper = _string(parameters, "paper")
+                if paper not in {"A4", "A3", "A2", "A1", "A0"}:
+                    raise CopperbrainError(
+                        ErrorCode.INVALID_INPUT,
+                        "Unsupported schematic paper size",
+                        details={"paper": paper},
+                    )
+                schematic.set_paper_size(paper)
             else:  # pragma: no cover - Pydantic rejects this before the adapter
                 raise CopperbrainError(ErrorCode.INVALID_INPUT, "Unsupported schematic operation")
         schematic.save(schematic_path, preserve_format=True)

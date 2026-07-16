@@ -428,8 +428,12 @@ da questa estensione.
   workspace privato, PDF progetto, DRC comparativo, hash anti-stale, snapshot e rollback.
 - Apply e rollback richiedono editor salvato e chiuso. Il progetto live non cambia durante analisi,
   proposta, preparazione o validazione.
-- Il file adapter consente spostamento e rotazione sul lato esistente; il flip `F.Cu`/`B.Cu` resta
-  fuori scope perche richiede la trasformazione coordinata di pad, grafica, testo e modelli.
+- Spostamento e rotazione sul lato corrente restano disponibili tramite file adapter. I cambi lato
+  `F.Cu`/`B.Cu` passano esclusivamente da un worker a comando fisso basato sull'API `pcbnew` di
+  KiCad, che trasforma in modo coordinato pad, grafica, testi e modelli 3D nella copia temporanea.
+- La proposta compatta usa connettivita e coordinate pad, valuta rotazioni ortogonali e inviluppo,
+  mantiene i connettori verso il bordo e riserva corridoi maggiori alle reti di potenza inferite.
+  Il bottom automatico e limitato ai piccoli passivi SMD; THT, IC e potenza conservano il lato.
 
 ### Criteri di accettazione
 
@@ -445,7 +449,7 @@ da questa estensione.
 - [x] Rollback ripristina il file `.kicad_pcb` byte-per-byte.
 - [x] Il binding IPC ufficiale e rilevato dinamicamente e non e requisito per i test offline.
 - [x] Routing, zone, keepout e outline mutation restano fuori scope.
-- [x] Il cambio lato del footprint e rifiutato esplicitamente.
+- [x] Il cambio lato usa l'API KiCad nella preview, resta tipizzato ed e coperto da DRC e conferma.
 
 ## 15. Estensione approvata — inizializzazione headless PCB via MCP
 
@@ -470,6 +474,8 @@ limitata a PCB vuoti, senza footprint, piste, zone o `Edge.Cuts` preesistenti.
   upgrade KiCad, preview, confronto ERC/DRC, hash, snapshot, apply e rollback.
 - `PcbLayoutAdapter` risolve footprint installati o di progetto e compone il board esclusivamente
   dalle operazioni tipizzate. Ogni componente dello schematico deve comparire una sola volta.
+- I placement iniziali possono specificare `F.Cu` o `B.Cu`; il bottom viene realizzato dal worker
+  KiCad a comando fisso dopo la composizione tipizzata, prima di parser, PDF e DRC.
 - Le regole Copperbrain di clearance e creepage tra oggetti sono rese con esclusione dello stesso
   parent footprint; le vecchie regole gestite sono migrate soltanto nella copia temporanea.
 - Il sorgente non cambia durante prepare e validate. Apply richiede change set validato, conferma
@@ -579,3 +585,70 @@ e non estende il routing a zone, keepout o certificazioni di produzione.
   per produzione: termica, SI/PI, EMC, stackup, impedenza e DFM restano `not_assessed`.
 - [x] Apply e rollback continuano a richiedere conferma esplicita, editor chiuso, hash non stale,
   snapshot e sostituzione atomica.
+
+## 18. Estensione approvata — creazione sicura di un progetto vuoto
+
+Questa estensione, approvata dalla richiesta benchmark del 15 luglio 2026, consente di avviare un
+nuovo progetto senza copiare fixture o scrivere manualmente S-expression KiCad.
+
+### Contratti MCP
+
+| Tool | Tipo | Risultato essenziale |
+|---|---|---|
+| `prepare_project_creation` | anteprima | scaffold privato, validazione e copia sotto il futuro `copperbrain-output/previews/` |
+| `validate_project_creation` | lettura | nuova verifica di progetto, schematico, PCB, ERC e DRC disponibili |
+| `apply_project_creation` | scrittura confermata | creazione atomica dei tre file sorgente dopo conferma esplicita |
+| `rollback_project_creation` | scrittura confermata | rimozione dei file creati solo se gli hash post-apply coincidono |
+
+### Decisioni e criteri di accettazione
+
+- [x] Nome e numero di layer sono input Pydantic limitati; non entra sintassi KiCad libera.
+- [x] Lo schematico nasce da `kicad-sch-api` e il PCB dall'API `pcbnew` distribuita con KiCad.
+- [x] Una directory target non vuota viene rifiutata; e ammessa soltanto la preview Copperbrain.
+- [x] Prima della conferma nessun `.kicad_pro`, `.kicad_sch` o `.kicad_pcb` appare nel target.
+- [x] Apply e rollback sono atomici e il rollback rifiuta file modificati dopo l'applicazione.
+- [x] Il manifest Pydantic e persistito nello storage privato e consente validate/apply/rollback
+  dopo il riavvio del server senza fidarsi di percorsi esterni.
+
+## 19. Estensione approvata — benchmark motore 12 V / 20 A circoscritto
+
+La richiesta del 16 luglio 2026 approva un solo reference design deterministico per il progetto
+`test_bench_pico`; non introduce generazione autonoma e illimitata di circuiti. Il template usa
+soltanto operazioni schematiche semantiche, modelli di regole e un piano di placement tipizzato.
+
+### Topologia e assunzioni revisionabili
+
+- motore DC brushed bidirezionale, 12 V nominali e target provvisorio 20 A continui;
+- DRV8701 con quattro MOSFET esterni CSD18540Q5B, shunt Kelvin da 1 mOhm e fusibile ATO 25 A;
+- ATtiny1616 alimentato dal DVDD del driver, UPDI, fault/current feedback e LED di stato;
+- RS-485 half-duplex THVD1429 con SM712 e terminazione 120 ohm inseribile;
+- quattro ingressi digitali campo 5–24 V protetti con optoisolatore, non quattro uscite;
+- `PGND` di potenza separata dalla `GND` logica e unita in un solo punto 0 ohm vicino allo shunt;
+- PCB 120 x 100 mm, due layer, rame esterno assunto 70 um, incremento termico ammesso 20 C.
+
+Le assunzioni restano provvisorie finche l'utente non conferma tensione, corrente continua/stallo,
+tipo motore, natura degli I/O e stackup. Il template non e una certificazione di produzione.
+
+La creazione di un nuovo progetto usa due layer di rame per default. Un singolo layer e riservato
+a progetti esplicitamente minimali e non e generato dal workflow corrente; quattro layer richiedono
+una richiesta esplicita. Il routing controllato opera comunque soltanto su `F.Cu` e `B.Cu`.
+
+### Gate e limiti
+
+- [x] Schematico e layout nascono da API/operazioni tipizzate; nessuna S-expression e scritta
+  direttamente dal modello.
+- [x] `multiple_net_names` e una regressione ERC bloccante anche se KiCad la classifica warning.
+- [x] Le geometrie footprint considerano rotazione, primitive custom e pad diversi sulla stessa
+  rete prima di derivare fanout e clearance.
+- [x] La preview combinata deve avere ERC senza errori, DRC senza violazioni e placement 100.
+- [x] Il placement benchmark e stato rigenerato con distanza ratsnest, rotazioni ortogonali,
+  corridoi di routing e bottom per soli passivi: area outline ridotta del 29% e ratsnest stimata
+  ridotta del 46% rispetto al piano 140 x 120 mm precedente, senza errori DRC sul benchmark.
+- [x] Le reti 20 A conservano la larghezza preferita calcolata (6,15 mm con le assunzioni sopra);
+  il vincolo non viene ridotto per forzare un risultato dell'autorouter.
+- [x] Se FreeRouting non produce un candidato completo entro il watchdog, il PCB resta
+  intenzionalmente unrouted e non applicabile come finalizzazione.
+- [ ] Zone/poligoni di rame, verifica termica/SOA, stackup, EMC/SI/PI, DFM e routing finale sono
+  richiesti prima di qualsiasi dichiarazione `production_ready`; le zone restano fuori dall'MVP.
+- [ ] Ogni apply al progetto sorgente richiede conferma esplicita, editor chiuso, hash non stale,
+  snapshot e rollback secondo i workflow gia approvati.

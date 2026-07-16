@@ -15,10 +15,12 @@ from copperbrain.errors import CopperbrainError
 from copperbrain.models import CourtyardAddition, ErrorCode, FootprintConstraintCandidate
 
 _NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)"
-_PAD_HEADER = re.compile(r'^\(pad\s+"?([^"\s)]+)"?\s+([^\s)]+)')
-_AT = re.compile(rf"\(at\s+({_NUMBER})\s+({_NUMBER})")
+_PAD_HEADER = re.compile(r'^\(pad\s+"?([^"\s)]+)"?\s+([^\s)]+)(?:\s+([^\s)]+))?')
+_AT = re.compile(rf"\(at\s+({_NUMBER})\s+({_NUMBER})(?:\s+({_NUMBER}))?")
 _SIZE = re.compile(rf"\(size\s+({_NUMBER})\s+({_NUMBER})")
 _POINT = re.compile(rf"\((?:start|end|center)\s+({_NUMBER})\s+({_NUMBER})")
+_XY = re.compile(rf"\(xy\s+({_NUMBER})\s+({_NUMBER})")
+_WIDTH = re.compile(rf"\(width\s+({_NUMBER})\s*\)")
 _LIBRARY = re.compile(r'\(lib\s+\(name\s+"([^"]+)"\).*?\(uri\s+"([^"]+)"\)', re.DOTALL)
 
 
@@ -29,6 +31,7 @@ class PadGeometry:
     y_mm: float
     width_mm: float
     height_mm: float
+    custom: bool = False
 
 
 @dataclass(frozen=True)
@@ -53,17 +56,32 @@ class FootprintGeometry:
             math.hypot(left.x_mm - right.x_mm, left.y_mm - right.y_mm)
             for index, left in enumerate(self.pads)
             for right in self.pads[index + 1 :]
-            if (left.x_mm, left.y_mm) != (right.x_mm, right.y_mm)
+            if left.number != right.number and (left.x_mm, left.y_mm) != (right.x_mm, right.y_mm)
         ]
         return min(distances) if distances else None
 
     @property
     def pad_min_clearance_mm(self) -> float | None:
         """Minimum edge-to-edge gap between axis-aligned electrical pad bounds."""
+        return self.pad_min_clearance_for_pin_nets()
+
+    def pad_min_clearance_for_pin_nets(
+        self, pin_nets: dict[str, str] | None = None
+    ) -> float | None:
+        """Measure clearance while allowing overlapping pads on the same electrical net."""
         clearances = []
         for index, left in enumerate(self.pads):
             for right in self.pads[index + 1 :]:
-                if (left.x_mm, left.y_mm) == (right.x_mm, right.y_mm):
+                if left.number == right.number or (
+                    left.x_mm,
+                    left.y_mm,
+                ) == (right.x_mm, right.y_mm):
+                    continue
+                if (
+                    pin_nets is not None
+                    and pin_nets.get(left.number)
+                    and pin_nets.get(left.number) == pin_nets.get(right.number)
+                ):
                     continue
                 x_gap = max(
                     abs(left.x_mm - right.x_mm) - (left.width_mm + right.width_mm) / 2,
@@ -73,6 +91,16 @@ class FootprintGeometry:
                     abs(left.y_mm - right.y_mm) - (left.height_mm + right.height_mm) / 2,
                     0.0,
                 )
+                if (
+                    x_gap == 0
+                    and y_gap == 0
+                    and left.x_mm != right.x_mm
+                    and left.y_mm != right.y_mm
+                    and (left.custom or right.custom)
+                ):
+                    # IPC-style corner pads use chamfered custom polygons. Their rectangular
+                    # bounds overlap diagonally even though the copper polygons do not.
+                    continue
                 clearances.append(math.hypot(x_gap, y_gap))
         return min(clearances) if clearances else None
 
@@ -138,13 +166,29 @@ def parse_footprint_geometry(
             continue
         if header.group(2).casefold() == "np_thru_hole":
             continue
+        width = float(size.group(1))
+        height = float(size.group(2))
+        custom = (header.group(3) or "").casefold() == "custom"
+        if custom:
+            points = [(float(x), float(y)) for x, y in _XY.findall(form)]
+            if points:
+                stroke = max((float(value) for value in _WIDTH.findall(form)), default=0.0)
+                width = max(width, max(x for x, _ in points) - min(x for x, _ in points) + stroke)
+                height = max(
+                    height,
+                    max(y for _, y in points) - min(y for _, y in points) + stroke,
+                )
+        angle = math.radians(float(position.group(3) or 0))
+        rotated_width = abs(width * math.cos(angle)) + abs(height * math.sin(angle))
+        rotated_height = abs(width * math.sin(angle)) + abs(height * math.cos(angle))
         pads.append(
             PadGeometry(
                 number=header.group(1),
                 x_mm=float(position.group(1)),
                 y_mm=float(position.group(2)),
-                width_mm=float(size.group(1)),
-                height_mm=float(size.group(2)),
+                width_mm=rotated_width,
+                height_mm=rotated_height,
+                custom=custom,
             )
         )
     if not pads:
@@ -219,6 +263,7 @@ def analyze_component_footprint(
     reference: str,
     library_id: str,
     width_ratio: float,
+    pin_nets: dict[str, str] | None = None,
 ) -> tuple[FootprintGeometry | None, FootprintConstraintCandidate]:
     path = resolve_footprint(project_root, library_id)
     if path is None:
@@ -236,9 +281,11 @@ def analyze_component_footprint(
             source=path,
             warnings=(exc.error.message,),
         )
-    safe_width = math.floor(geometry.pad_min_dimension_mm * width_ratio * 100) / 100
-    pad_clearance = geometry.pad_min_clearance_mm
-    safe_clearance = math.floor(pad_clearance * 100) / 100 if pad_clearance is not None else None
+    safe_width = math.floor((geometry.pad_min_dimension_mm * width_ratio + 0.0005) * 100) / 100
+    pad_clearance = geometry.pad_min_clearance_for_pin_nets(pin_nets)
+    safe_clearance = (
+        math.floor((pad_clearance + 0.0005) * 100) / 100 if pad_clearance is not None else None
+    )
     warnings = () if geometry.has_courtyard else ("Footprint has no courtyard",)
     return geometry, FootprintConstraintCandidate(
         reference=reference,

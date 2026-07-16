@@ -159,6 +159,7 @@ class PcbRuleService:
             "Suggested roles are naming-based evidence, not inferred electrical ratings"
         )
         footprints: list[FootprintConstraintCandidate] = []
+        pin_nets = {(pin.reference, pin.pin): net.name for net in summary.nets for pin in net.pins}
         for component in summary.components:
             if component.reference.startswith("#") or not component.footprint:
                 continue
@@ -167,6 +168,11 @@ class PcbRuleService:
                 reference=component.reference,
                 library_id=component.footprint,
                 width_ratio=ManufacturingProfile().fanout_width_ratio,
+                pin_nets={
+                    pin: net
+                    for (reference, pin), net in pin_nets.items()
+                    if reference == component.reference
+                },
             )
             footprints.append(candidate)
         return PcbConstraintAnalysis(
@@ -304,6 +310,7 @@ class PcbRuleService:
         class_clearances = {item.name: item.clearance_mm for item in classes}
         net_classes = {item.net: item.netclass for item in assignments}
         summary = self.projects.summary(session_id)
+        pin_nets = {(pin.reference, pin.pin): net.name for net in summary.nets for pin in net.pins}
         required_by_reference: dict[str, float] = {}
         clearance_by_reference: dict[str, float] = {}
         for net in summary.nets:
@@ -337,6 +344,11 @@ class PcbRuleService:
                 reference=component.reference,
                 library_id=component.footprint,
                 width_ratio=profile.fanout_width_ratio,
+                pin_nets={
+                    pin: net
+                    for (reference, pin), net in pin_nets.items()
+                    if reference == component.reference
+                },
             )
             if (
                 geometry is None

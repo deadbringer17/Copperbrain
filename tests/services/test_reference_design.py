@@ -4,6 +4,10 @@ from copperbrain.models import ComponentCandidate
 from copperbrain.services.reference_design import (
     five_volt_buck_operations,
     forty_eight_to_twelve_operations,
+    motor_driver_bench_layout_plan,
+    motor_driver_bench_manufacturing_profile,
+    motor_driver_bench_operations,
+    motor_driver_bench_rule_requirements,
 )
 
 
@@ -63,3 +67,98 @@ def test_48v_reference_design_rejects_incompatible_regulator() -> None:
     )
     with pytest.raises(ValueError, match="LM5576"):
         forty_eight_to_twelve_operations(candidate)
+
+
+def test_motor_driver_benchmark_has_power_control_rs485_and_four_sensor_inputs() -> None:
+    driver = ComponentCandidate(
+        lcsc="C90964",
+        mpn="DRV8701ERGER",
+        manufacturer="Texas Instruments",
+        description="H bridge gate driver",
+        package="VQFN-24",
+        stock=100,
+    )
+    transceiver = ComponentCandidate(
+        lcsc="C1850236",
+        mpn="THVD1429DR",
+        manufacturer="Texas Instruments",
+        description="RS-485",
+        package="SOIC-8",
+        stock=100,
+    )
+    mosfet = ComponentCandidate(
+        lcsc="C86513",
+        mpn="CSD18540Q5B",
+        manufacturer="Texas Instruments",
+        description="60 V MOSFET",
+        package="VSON-8",
+        stock=100,
+    )
+
+    operations = motor_driver_bench_operations(driver, transceiver, mosfet)
+    added = {item.target for item in operations if item.kind == "add_component"}
+    labels = {str(item.parameters.get("text")) for item in operations if item.kind == "label"}
+
+    assert {"U1", "U2", "U3", "Q1", "Q2", "Q3", "Q4", "RSH1", "R0"} <= added
+    assert {"J5", "J6", "J7", "J8", "U4", "U5", "U6", "U7"} <= added
+    assert {"MOTOR_A", "MOTOR_B", "SHUNT_POWER", "RS485_A", "RS485_B"} <= labels
+    assert {f"SENSOR{index}_N" for index in range(1, 5)} <= labels
+    assert "5V_DVDD" in labels
+    assert "PGND" in labels
+    assert "3V3" not in labels
+    assert any(
+        item.kind == "set_paper_size" and item.parameters.get("paper") == "A3"
+        for item in operations
+    )
+    sensor_diode_nets = {
+        item.target: item.parameters.get("text")
+        for item in operations
+        if item.kind == "label" and item.target.startswith("SENSOR1_LED_A:DS1")
+    }
+    assert sensor_diode_nets == {"SENSOR1_LED_A:DS1.1": "SENSOR1_LED_A"}
+    assert any(item.target == "PGND:DS1.2" for item in operations)
+    assert any(item.target == "PGND:R0.1" for item in operations)
+    assert any(item.target == "GND:R0.2" for item in operations)
+    assert any(item.target == "GND:D3.1" for item in operations)
+    assert any(item.target == "STATUS_LED_A:D3.2" for item in operations)
+    u2 = next(item for item in operations if item.kind == "add_component" and item.target == "U2")
+    assert "ThermalVias" not in str(u2.parameters["footprint"])
+
+    layout = motor_driver_bench_layout_plan()
+    assert (layout.outline.width_mm, layout.outline.height_mm) == (120, 100)
+    assert len(layout.placements) == 64
+    assert len(layout.mounting_holes) == 4
+    assert {item.reference for item in layout.placements} == {
+        reference for reference in added if not reference.startswith("#")
+    }
+    assert sum(item.layer == "B.Cu" for item in layout.placements) == 30
+    assert sum(item.rotation_deg % 360 != 0 for item in layout.placements) >= 40
+
+    profile = motor_driver_bench_manufacturing_profile()
+    requirements = motor_driver_bench_rule_requirements()
+    assert profile.copper_thickness_um == 70
+    assert profile.allowed_temperature_rise_c == 20
+    high_current = next(item for item in requirements if item.name == "CB_HIGH_CURRENT")
+    assert high_current.current_a == 20
+    assert "/PGND" in high_current.nets
+    assert "/GND" not in high_current.nets
+    assert any(
+        item.kind == "update_property"
+        and item.target == "U1"
+        and item.parameters.get("name") == "DesignNote"
+        and "PROVISIONAL" in str(item.parameters.get("value"))
+        for item in operations
+    )
+
+
+def test_motor_driver_benchmark_rejects_incompatible_power_parts() -> None:
+    invalid = ComponentCandidate(
+        lcsc="C1",
+        mpn="WRONG",
+        manufacturer="Acme",
+        description="wrong",
+        package="SOP",
+        stock=1,
+    )
+    with pytest.raises(ValueError, match="DRV8701E"):
+        motor_driver_bench_operations(invalid, invalid, invalid)

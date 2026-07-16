@@ -6,7 +6,7 @@ KiCad 10, JLCImport, and JLCPCB Tools are all detected and exercised.
 
 | Criterion | Evidence |
 |---|---|
-| Local MCP client can discover the server | `tests/test_server.py` verifies all 54 core and approved-extension FastMCP tools; `copperbrain` starts stdio only |
+| Local MCP client can discover the server | `tests/test_server.py` verifies all 58 core and approved-extension FastMCP tools; `copperbrain` starts stdio only |
 | KiCad 10.x and both JLC plugins are detected | `tests/adapters/test_kicad_detection.py`; real detection reports KiCad 10, JLCImport, and JLCPCB Tools |
 | Existing project analyzed read-only | `tests/integration/test_kicad_workflow.py` exports a real KiCad 10 netlist without touching the source |
 | History and backup copies excluded | `tests/services/test_projects.py` proves `.history`, `*-backups`, and generated output schematics are never selected as sources |
@@ -20,6 +20,15 @@ KiCad 10, JLCImport, and JLCPCB Tools are all detected and exercised.
 | BOM has LCSC/MPN and multiple quantities | Offline E2E flow plus BOM grouping/enrichment/cost tests and enforced project-local JSON/CSV/Markdown exports |
 | Cost exclusions are explicit | `CostEstimate.excluded_costs` and generated Markdown disclaimer |
 | Demo requires no manual file correction | `uv run python scripts/run_demo.py`; covered by `tests/e2e/test_demo_pipeline.py` |
+
+## Empty-project creation evidence
+
+| Criterion | Evidence |
+|---|---|
+| No handwritten KiCad S-expression | `ProjectScaffoldAdapter` uses `kicad-sch-api.create_schematic` and the bundled `pcbnew.BOARD`/`SaveBoard` API |
+| Preview before source creation | Service tests verify that only `copperbrain-output/previews/<id>/` exists before confirmation |
+| Explicit confirmation and target safety | Service tests reject missing confirmation and nonempty target directories |
+| Validation and rollback | KiCad integration parses a real four-layer scaffold; rollback requires unchanged post-apply hashes |
 
 ## PCB-rule extension evidence
 
@@ -39,12 +48,13 @@ KiCad 10, JLCImport, and JLCPCB Tools are all detected and exercised.
 | Criterion | Evidence |
 |---|---|
 | Typed PCB summary and net inspection | `tests/adapters/test_pcb_design_adapter.py` verifies outline, footprint, net, pad, track, via, layer, and routed-length extraction |
-| Deterministic placement analysis/proposal | `tests/services/test_pcb_design.py` verifies overlap/outline scoring, empty-board refusal, stable proposals, spacing, and exact requested references |
+| Deterministic placement analysis/proposal | `tests/services/test_pcb_design.py` verifies stable connectivity-aware proposals and reduced ratsnest/envelope metrics; `tests/services/test_placement_optimizer.py` covers guarded bottom-side eligibility and THT preservation |
 | No arbitrary KiCad syntax enters MCP | Public placement tools accept only Pydantic request and operation models; the adapter tests apply an allowlisted placement |
 | Source remains unchanged before confirmation | Service tests compare live PCB bytes before and after prepare/preview/validation |
 | Project-local PDF preview | Service and transport tests verify output below `copperbrain-output/previews/<id>/` |
 | DRC-gated safe apply | Unit tests verify comparative DRC gates, confirmation, editor state, and stale hash refusal |
 | Byte-exact rollback | Service test applies a placement and restores the original `.kicad_pcb` bytes |
+| Coordinated F.Cu/B.Cu changes | `tests/integration/test_placement_flip_integration.py` verifies KiCad API transformation of footprint, pads, courtyard, and mirrored text |
 | Real KiCad compatibility | Integration test moves one footprint in a temporary KiCad 10 demo, runs JSON DRC, and exports a real PDF |
 | Optional official IPC backend | `kicad-python` is locked; adapter status and path verification keep unavailable/running instances explicit |
 
@@ -53,7 +63,7 @@ KiCad 10, JLCImport, and JLCPCB Tools are all detected and exercised.
 | Criterion | Evidence |
 |---|---|
 | Typed code-only initialization | MCP wrapper tests validate `PcbLayoutPlan`; adapter tests compose a board without GUI automation or raw public KiCad syntax |
-| Complete deterministic plan | Model and adapter tests reject duplicate references, missing schematic components, and populated boards |
+| Complete deterministic plan | Model and adapter tests reject duplicate references, missing physical schematic footprints, and populated boards while excluding nonphysical power symbols |
 | Electrical and geometric gates | Service runs comparative ERC/DRC, parser validation, and requires placement score 100 before apply |
 | Managed pair-rule safety | Rule adapter tests scope clearance/creepage to different parent footprints, preserve user rules, and prove migration idempotence |
 | Safe preview/apply/rollback | Layout service uses private workspaces, project-local preview, source hashes, confirmation, editor-state checks, snapshots, atomic copies, and rollback |
@@ -65,6 +75,7 @@ KiCad 10, JLCImport, and JLCPCB Tools are all detected and exercised.
 |---|---|
 | Typed connectivity and operations | `tests/adapters/test_pcb_routing_adapter.py` verifies open-net detection and allowlisted segment writing |
 | Fixed-command specialized backend | `tests/adapters/test_freerouting.py` verifies Java/JAR/KiCad-Python status, DSN sanitization, bounded arguments, and unavailable-backend refusal |
+| Exact requested-net scope | FreeRouting adapter regressions remove unrelated DSN nets and refuse requested nets absent from the KiCad export before Java starts |
 | Typed import and KiCad 9/10 compatibility | `tests/adapters/test_pcb_routing_adapter.py` verifies numeric and name-valued copper nets plus allowlisted segment/via extraction |
 | Deterministic candidate evaluation | `tests/services/test_pcb_routing.py` verifies typed deltas, same-stem project-rule DRC context, metrics, and stable ranking |
 | Source remains unchanged before confirmation | Routing service test compares live PCB bytes through proposal, prepare, and validation |
@@ -83,6 +94,17 @@ KiCad 10, JLCImport, and JLCPCB Tools are all detected and exercised.
 | Output copies never become sources | Project/output tests reject opening or publishing recursively below `copperbrain-output/` |
 | Honest production-readiness state | `tests/services/test_pcb_finalization.py` proves clean electrical checks remain `production_ready=false` while engineering/DFM gates are unassessed |
 | Compact MCP orchestration | `tests/test_server.py` covers summary, readiness, prepare/validate/apply finalization, and persisted report wrappers |
+
+## Bounded motor-benchmark evidence
+
+| Criterion | Evidence |
+|---|---|
+| Semantic schematic generation only | `tests/services/test_reference_design.py` verifies the DRV8701 bridge, ATtiny1616, THVD1429, four sensor channels, polarity, star ground, A3 sheet, and provisional metadata |
+| Deterministic physical plan | The same test verifies all 64 physical references, compact 120 x 100 mm two-sided outline, orthogonal rotations, and four M3 holes |
+| Reviewed 20 A constraints | Tests verify 70 um external copper, 20 C rise, 20 A `PGND`/motor classes, and separation from logic `GND` |
+| Imported footprint geometry is safe to analyze | `tests/adapters/test_footprint_geometry.py` covers rotation, custom primitives, duplicate/same-net pads, chamfered corners, and conversion tolerances |
+| Accidental net merges block apply | `tests/services/test_changes.py` treats new `multiple_net_names` ERC warnings as blocking regressions |
+| Routing limits remain honest | The layout contract reports open connections; readiness remains false until routing, power copper, thermal, EMC, stackup, and DFM are assessed |
 
 ## Validation gate
 

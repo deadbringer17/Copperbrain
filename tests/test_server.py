@@ -45,6 +45,10 @@ def test_server_exposes_complete_mvp_contract() -> None:
     names = set(mcp._tool_manager._tools)
     assert names == {
         "detect_kicad",
+        "prepare_project_creation",
+        "validate_project_creation",
+        "apply_project_creation",
+        "rollback_project_creation",
         "open_project",
         "get_project_summary",
         "analyze_schematic",

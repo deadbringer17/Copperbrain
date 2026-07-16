@@ -39,6 +39,7 @@ def test_publish_preview_is_project_local_and_excludes_nested_outputs(tmp_path: 
     backups = workspace / "demo-backups"
     backups.mkdir()
     (backups / "old.zip").write_bytes(b"backup")
+    (workspace / "demo.kicad_prl").write_text("local paths", encoding="utf-8")
 
     published = publish_preview(workspace, project, "change-1")
 
@@ -47,6 +48,7 @@ def test_publish_preview_is_project_local_and_excludes_nested_outputs(tmp_path: 
     assert not (published / OUTPUT_DIRECTORY).exists()
     assert not (published / ".history").exists()
     assert not (published / "demo-backups").exists()
+    assert not (published / "demo.kicad_prl").exists()
 
 
 def test_publish_preview_rejects_recursive_output_root(tmp_path: Path) -> None:

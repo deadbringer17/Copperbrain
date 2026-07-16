@@ -50,3 +50,40 @@ def test_update_property_replaces_existing_standard_footprint(tmp_path: Path) ->
     reloaded = kicad_sch_api.load_schematic(str(schematic))
     assert reloaded.components.get("J1").footprint == footprint
     assert footprint in schematic.read_text(encoding="utf-8-sig")
+
+
+def test_set_paper_size_accepts_allowlisted_size(tmp_path: Path) -> None:
+    schematic = tmp_path / "paper.kicad_sch"
+    created = kicad_sch_api.create_schematic("paper")
+    created.save(schematic)
+
+    SchematicApiAdapter().apply(
+        schematic,
+        (
+            ChangeOperation(
+                kind="set_paper_size",
+                target="schematic",
+                parameters={"paper": "A3"},
+            ),
+        ),
+    )
+
+    assert '(paper "A3")' in schematic.read_text(encoding="utf-8-sig")
+
+
+def test_set_paper_size_rejects_non_allowlisted_size(tmp_path: Path) -> None:
+    schematic = tmp_path / "paper.kicad_sch"
+    created = kicad_sch_api.create_schematic("paper")
+    created.save(schematic)
+
+    with pytest.raises(CopperbrainError, match="paper size"):
+        SchematicApiAdapter().apply(
+            schematic,
+            (
+                ChangeOperation(
+                    kind="set_paper_size",
+                    target="schematic",
+                    parameters={"paper": "custom"},
+                ),
+            ),
+        )

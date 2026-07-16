@@ -9,6 +9,7 @@ from pathlib import Path
 import sexpdata  # type: ignore[import-untyped]
 
 from copperbrain.adapters.footprint_geometry import resolve_footprint
+from copperbrain.adapters.pcb_placement import KiCadPlacementAdapter
 from copperbrain.errors import CopperbrainError
 from copperbrain.models import Component, ErrorCode, Net, PcbLayoutPlan, PlacementOperation
 
@@ -101,6 +102,9 @@ def _instantiate(
 class PcbLayoutAdapter:
     """Build only an empty board using installed allowlisted footprint templates."""
 
+    def __init__(self, placement_adapter: KiCadPlacementAdapter | None = None) -> None:
+        self.placement_adapter = placement_adapter or KiCadPlacementAdapter()
+
     def compose(
         self,
         pcb: Path,
@@ -130,12 +134,12 @@ class PcbLayoutAdapter:
                 "Headless PCB initialization requires an empty board without Edge.Cuts",
             )
 
-        by_reference = {item.reference: item for item in components}
+        by_reference = {item.reference: item for item in components if item.footprint}
         placements = {item.reference: item for item in plan.placements}
         if set(placements) != set(by_reference):
             raise CopperbrainError(
                 ErrorCode.INVALID_INPUT,
-                "Layout must place every schematic component exactly once",
+                "Layout must place every schematic footprint exactly once",
                 details={
                     "missing": sorted(set(by_reference) - set(placements)),
                     "unknown": sorted(set(placements) - set(by_reference)),
@@ -211,3 +215,6 @@ class PcbLayoutAdapter:
                 )
             )
         _atomic_write(pcb, sexpdata.dumps(tree))
+        bottom = tuple(item for item in plan.placements if item.layer == "B.Cu")
+        if bottom:
+            self.placement_adapter.apply(pcb, bottom)

@@ -14,6 +14,7 @@ from copperbrain.models import (
     PlacementOperation,
     PlacementRequest,
     PriceBreak,
+    ProjectCreationSpec,
     RectangularBoardOutline,
     utc_now,
 )
@@ -96,3 +97,11 @@ def test_layout_plan_rejects_duplicate_component_references() -> None:
                 PlacementOperation(reference="R1", x_mm=2, y_mm=2),
             ),
         )
+
+
+def test_project_creation_spec_rejects_paths_and_unsupported_layers() -> None:
+    assert ProjectCreationSpec(name="bench").copper_layers == 2
+    with pytest.raises(ValidationError):
+        ProjectCreationSpec(name="../unsafe")
+    with pytest.raises(ValidationError):
+        ProjectCreationSpec(name="bench", copper_layers=6)

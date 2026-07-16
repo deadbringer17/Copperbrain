@@ -41,7 +41,18 @@ def test_route_uses_only_fixed_argument_lists(tmp_path: Path) -> None:
         commands.append(command)
         invocations.append(kwargs)
         if "export" in command:
-            Path(command[-1]).write_text("(pcb Ω-board\n)\n", encoding="utf-8")
+            Path(command[-1]).write_text(
+                """(pcb Ω-board
+  (network
+    (net /KEEP (pins U1-1 U2-1))
+    (net /DROP (pins U1-2 U2-2))
+    (class default /KEEP /DROP (rule (width 200) (clearance 200)))
+  )
+  (wiring)
+)
+""",
+                encoding="utf-8",
+            )
         elif "-do" in command:
             Path(command[command.index("-do") + 1]).write_text("(session routed)\n")
         elif "import" in command:
@@ -58,7 +69,7 @@ def test_route_uses_only_fixed_argument_lists(tmp_path: Path) -> None:
     candidate = adapter.route(
         pcb,
         tmp_path / "candidate",
-        RoutingRequest(max_passes=7, thread_count=2),
+        RoutingRequest(nets=("/KEEP",), max_passes=7, thread_count=2),
         "prioritized",
     )
     assert candidate.pcb.is_file()
@@ -69,7 +80,44 @@ def test_route_uses_only_fixed_argument_lists(tmp_path: Path) -> None:
     assert router[router.index("-mp") + 1] == "7"
     assert router[router.index("-mt") + 1] == "2"
     assert "--gui.enabled=false" in router
-    assert "Ω" not in (tmp_path / "candidate" / "freerouting-input.dsn").read_text(encoding="utf-8")
+    dsn = (tmp_path / "candidate" / "freerouting-input.dsn").read_text(encoding="utf-8")
+    assert "Ω" not in dsn
+    assert "(net /KEEP" in dsn
+    assert "(net /DROP" not in dsn
+
+
+def test_route_refuses_requested_net_missing_from_dsn(tmp_path: Path) -> None:
+    java = tmp_path / "java.exe"
+    jar = tmp_path / "freerouting-2.2.4.jar"
+    kicad_python = tmp_path / "python.exe"
+    for executable in (java, jar, kicad_python):
+        executable.write_bytes(b"fixture")
+    pcb = tmp_path / "input.kicad_pcb"
+    shutil.copy2(FIXTURE, pcb)
+
+    def runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "export" in command:
+            Path(command[-1]).write_text(
+                "(pcb board\n  (network (net /KEEP (pins U1-1 U2-1)))\n  (wiring)\n)\n",
+                encoding="utf-8",
+            )
+        return subprocess.CompletedProcess(command, 0, "ok", "")
+
+    adapter = FreeRoutingAdapter(
+        jar_path=jar,
+        java_path=java,
+        java_major_version=25,
+        kicad_python_path=kicad_python,
+        runner=runner,
+    )
+    with pytest.raises(CopperbrainError, match="absent") as caught:
+        adapter.route(
+            pcb,
+            tmp_path / "candidate",
+            RoutingRequest(nets=("/MISSING",)),
+            "prioritized",
+        )
+    assert caught.value.error.details["missing_nets"] == ["/MISSING"]
 
 
 def test_route_refuses_unavailable_backend(tmp_path: Path) -> None:

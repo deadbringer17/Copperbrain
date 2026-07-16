@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import shutil
 import tempfile
@@ -14,6 +15,7 @@ from pathlib import Path
 from copperbrain.adapters.kicad_cli import export_pcb_pdf, run_drc
 from copperbrain.adapters.kicad_detection import detect_kicad
 from copperbrain.adapters.pcb_design import PcbFileAdapter
+from copperbrain.adapters.pcb_placement import KiCadPlacementAdapter
 from copperbrain.errors import CopperbrainError
 from copperbrain.models import (
     ChangeStatus,
@@ -22,6 +24,7 @@ from copperbrain.models import (
     PcbBounds,
     PcbFootprintPlacement,
     PcbNetInspection,
+    PcbPadInspection,
     PcbPlacementChangeSet,
     PcbSummary,
     PlacementAnalysis,
@@ -33,6 +36,7 @@ from copperbrain.models import (
     ValidationReport,
 )
 from copperbrain.services.outputs import PROJECT_COPY_IGNORE, publish_preview
+from copperbrain.services.placement_optimizer import optimize_placement, project_placement
 from copperbrain.services.projects import ProjectService, aggregate_hash, hash_file
 
 
@@ -77,22 +81,6 @@ def _inside(inner: PcbBounds, outer: PcbBounds) -> bool:
     )
 
 
-def _translated_bounds(
-    footprint: PcbFootprintPlacement, x: float, y: float, rotation: float
-) -> PcbBounds:
-    width = footprint.bounds.max_x_mm - footprint.bounds.min_x_mm
-    height = footprint.bounds.max_y_mm - footprint.bounds.min_y_mm
-    normalized = abs((rotation - footprint.rotation_deg) % 180)
-    if 45 < normalized < 135:
-        width, height = height, width
-    return PcbBounds(
-        min_x_mm=x - width / 2,
-        min_y_mm=y - height / 2,
-        max_x_mm=x + width / 2,
-        max_y_mm=y + height / 2,
-    )
-
-
 class PcbDesignService:
     """Own read-only PCB queries and confirmed placement change sets."""
 
@@ -101,12 +89,14 @@ class PcbDesignService:
         projects: ProjectService,
         data_dir: Path,
         adapter: PcbFileAdapter | None = None,
+        placement_adapter: KiCadPlacementAdapter | None = None,
         drc_runner: Callable[[Path | None], DrcReport] | None = None,
         pdf_exporter: Callable[[Path, Path], Path] | None = None,
     ) -> None:
         self.projects = projects
         self.data_dir = data_dir
         self.adapter = adapter or PcbFileAdapter()
+        self.placement_adapter = placement_adapter or KiCadPlacementAdapter()
         self.drc_runner = drc_runner or (lambda pcb: run_drc(detect_kicad().selected_cli, pcb))
         self.pdf_exporter = pdf_exporter or (
             lambda pcb, destination: export_pcb_pdf(detect_kicad().selected_cli, pcb, destination)
@@ -143,7 +133,9 @@ class PcbDesignService:
         return match
 
     @staticmethod
-    def _analyze_summary(summary: PcbSummary) -> PlacementAnalysis:
+    def _analyze_summary(
+        summary: PcbSummary, pads: tuple[PcbPadInspection, ...] = ()
+    ) -> PlacementAnalysis:
         overlaps: list[tuple[str, str]] = []
         outside: list[str] = []
         issues: list[PlacementIssue] = []
@@ -168,7 +160,12 @@ class PcbDesignService:
             )
         for index, left in enumerate(footprints):
             for right in footprints[index + 1 :]:
-                if _overlap(left.bounds, right.bounds):
+                shares_physical_side = (
+                    left.layer == right.layer
+                    or left.mount_type != "smd"
+                    or right.mount_type != "smd"
+                )
+                if shares_physical_side and _overlap(left.bounds, right.bounds):
                     first, second = sorted((left.reference, right.reference))
                     pair = (first, second)
                     overlaps.append(pair)
@@ -195,6 +192,52 @@ class PcbDesignService:
             len(overlaps) * 15 + len(outside) * 20 + (50 if summary.board_bounds is None else 0),
         )
         score = 0 if not footprints else 100 - deduction
+        placement_area = 0.0
+        compactness = 0.0
+        if footprints:
+            min_x = min(item.bounds.min_x_mm for item in footprints)
+            min_y = min(item.bounds.min_y_mm for item in footprints)
+            max_x = max(item.bounds.max_x_mm for item in footprints)
+            max_y = max(item.bounds.max_y_mm for item in footprints)
+            placement_area = (max_x - min_x) * (max_y - min_y)
+            footprint_area = sum(
+                (item.bounds.max_x_mm - item.bounds.min_x_mm)
+                * (item.bounds.max_y_mm - item.bounds.min_y_mm)
+                for item in footprints
+            )
+            compactness = min(100.0, 100 * footprint_area / placement_area)
+        by_net: dict[str, dict[str, list[tuple[float, float]]]] = {}
+        for pad in pads:
+            if not pad.net:
+                continue
+            by_net.setdefault(pad.net, {}).setdefault(pad.reference, []).append(
+                (pad.x_mm, pad.y_mm)
+            )
+        wire_length = 0.0
+        cross_layer = 0
+        layer_by_reference = {item.reference: item.layer for item in footprints}
+        for references in by_net.values():
+            points = [
+                (
+                    sum(x for x, _ in positions) / len(positions),
+                    sum(y for _, y in positions) / len(positions),
+                )
+                for positions in references.values()
+            ]
+            if len({layer_by_reference.get(reference) for reference in references}) > 1:
+                cross_layer += 1
+            if len(points) < 2:
+                continue
+            connected = {0}
+            while len(connected) < len(points):
+                distance, target = min(
+                    (math.dist(points[left], points[right]), right)
+                    for left in connected
+                    for right in range(len(points))
+                    if right not in connected
+                )
+                wire_length += distance
+                connected.add(target)
         assumptions = (
             "Overlap checks use embedded courtyard geometry when present and conservative "
             "bounds otherwise",
@@ -207,14 +250,23 @@ class PcbDesignService:
             overlap_pairs=tuple(sorted(set(overlaps))),
             outside_board=tuple(sorted(set(outside))),
             footprint_count=len(footprints),
+            estimated_wire_length_mm=round(wire_length, 6),
+            placement_area_mm2=round(placement_area, 6),
+            compactness_percent=round(compactness, 3),
+            cross_layer_net_count=cross_layer,
+            top_footprint_count=sum(item.layer == "F.Cu" for item in footprints),
+            bottom_footprint_count=sum(item.layer == "B.Cu" for item in footprints),
             assumptions=assumptions,
         )
 
     def analyze_placement(self, session_id: str) -> PlacementAnalysis:
-        return self._analyze_summary(self.summary(session_id))
+        _, pcb = self._session_pcb(session_id)
+        return self._analyze_summary(self.summary(session_id), self.adapter.pads(pcb))
 
     def propose(self, session_id: str, request: PlacementRequest) -> PlacementProposal:
+        _, pcb = self._session_pcb(session_id)
         summary = self.summary(session_id)
+        pads = self.adapter.pads(pcb)
         by_reference = {item.reference: item for item in summary.footprints}
         missing = sorted(set(request.references) - set(by_reference))
         locked = sorted(
@@ -234,96 +286,24 @@ class PcbDesignService:
                 "Locked footprints cannot be placed automatically",
                 details={"references": locked},
             )
-        region = request.region or summary.board_bounds
-        if region is None:
-            raise CopperbrainError(
-                ErrorCode.VALIDATION_FAILED,
-                "Placement requires explicit bounds when Edge.Cuts cannot be detected",
-            )
-        selected = set(request.references)
-        occupied = [item.bounds for item in summary.footprints if item.reference not in selected]
-        operations: list[PlacementOperation] = []
-        proposed_bounds: list[PcbBounds] = []
-        step = (
-            request.grid_mm
-            if request.strategy == "compact"
-            else max(request.grid_mm, request.spacing_mm)
-        )
-        for reference in request.references:
-            footprint = by_reference[reference]
-            width = footprint.bounds.max_x_mm - footprint.bounds.min_x_mm
-            height = footprint.bounds.max_y_mm - footprint.bounds.min_y_mm
-            if abs((request.rotation_deg - footprint.rotation_deg) % 180 - 90) < 45:
-                width, height = height, width
-            x = region.min_x_mm + width / 2
-            placed: PcbBounds | None = None
-            while x + width / 2 <= region.max_x_mm + 1e-9 and placed is None:
-                y = region.min_y_mm + height / 2
-                while y + height / 2 <= region.max_y_mm + 1e-9:
-                    candidate = PcbBounds(
-                        min_x_mm=x - width / 2,
-                        min_y_mm=y - height / 2,
-                        max_x_mm=x + width / 2,
-                        max_y_mm=y + height / 2,
-                    )
-                    if not any(
-                        _overlap(candidate, other, request.spacing_mm)
-                        for other in (*occupied, *proposed_bounds)
-                    ):
-                        placed = candidate
-                        break
-                    y += step
-                x += step
-            if placed is None:
-                raise CopperbrainError(
-                    ErrorCode.VALIDATION_FAILED,
-                    "Requested footprints do not fit in the placement region",
-                    details={"reference": reference},
-                )
-            center_x = (placed.min_x_mm + placed.max_x_mm) / 2
-            center_y = (placed.min_y_mm + placed.max_y_mm) / 2
-            operations.append(
-                PlacementOperation(
-                    reference=reference,
-                    x_mm=round(center_x, 6),
-                    y_mm=round(center_y, 6),
-                    rotation_deg=request.rotation_deg,
-                    layer=footprint.layer,
-                )
-            )
-            proposed_bounds.append(placed)
-
-        predicted = tuple(
-            item.model_copy(
-                update={
-                    "x_mm": operation.x_mm,
-                    "y_mm": operation.y_mm,
-                    "rotation_deg": operation.rotation_deg,
-                    "bounds": _translated_bounds(
-                        item, operation.x_mm, operation.y_mm, operation.rotation_deg
-                    ),
-                }
-            )
-            if (
-                operation := next((op for op in operations if op.reference == item.reference), None)
-            )
-            else item
-            for item in summary.footprints
-        )
+        operations = optimize_placement(summary, pads, request)
+        predicted, predicted_pads = project_placement(summary, pads, operations)
         after_summary = summary.model_copy(update={"footprints": predicted})
         return PlacementProposal(
             session_id=session_id,
             request=request,
-            operations=tuple(operations),
-            analysis_before=self._analyze_summary(summary),
-            analysis_after=self._analyze_summary(after_summary),
+            operations=operations,
+            analysis_before=self._analyze_summary(summary, pads),
+            analysis_after=self._analyze_summary(after_summary, predicted_pads),
             evidence=(
-                "Footprint sizes were derived from embedded pad/courtyard geometry",
-                "Candidates were scanned deterministically from the region minimum coordinates",
+                "Footprint sizes and pad anchors were derived from PCB geometry",
+                "Shared-net distance, placement envelope, edge affinity, rotation, and side "
+                "were scored deterministically",
+                "Only small SMD passives are eligible for automatic bottom-side placement",
             ),
             assumptions=(
-                "The proposal optimizes collision-free packing, not signal integrity or "
-                "mechanical intent",
+                "Net distance is a pre-routing estimate, not SI/PI/EMC or thermal validation",
+                "Connectors are biased toward board edges; high-fanout nets are down-weighted",
             ),
         )
 
@@ -392,7 +372,17 @@ class PcbDesignService:
         workspace.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(session.root, workspace, ignore=PROJECT_COPY_IGNORE)
         temporary_pcb = workspace / pcb.relative_to(session.root)
-        self.adapter.apply_placement(temporary_pcb, operations)
+        current_layers = {
+            item.reference: item.layer for item in self.adapter.summary(pcb, session_id).footprints
+        }
+        side_change = any(
+            item.layer is not None and item.layer != current_layers.get(item.reference)
+            for item in operations
+        )
+        if side_change:
+            self.placement_adapter.apply(temporary_pcb, operations)
+        else:
+            self.adapter.apply_placement(temporary_pcb, operations)
         validation, drc = self._validate_workspace(session, temporary_pcb)
         pdf = self.pdf_exporter(temporary_pcb, workspace / "Copperbrain-PCB-preview.pdf")
         preview_directory = publish_preview(workspace, session.root, identifier)

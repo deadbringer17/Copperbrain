@@ -16,6 +16,7 @@ PROJECT_COPY_IGNORE = shutil.ignore_patterns(
     ".git",
     ".history",
     "*-backups",
+    "*.kicad_prl",
     "*.lck",
     ".*.lck",
     "~*.lck",

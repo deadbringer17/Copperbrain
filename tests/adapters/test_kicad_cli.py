@@ -106,6 +106,32 @@ def test_export_schematic_pdf_is_atomic(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert destination.read_bytes() == b"pdf"
 
 
+@pytest.mark.parametrize("existing", [False, True])
+def test_read_only_cli_restores_incidental_project_local_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, existing: bool
+) -> None:
+    cli = tmp_path / "kicad-cli.exe"
+    cli.write_bytes(b"")
+    schematic = tmp_path / "demo.kicad_sch"
+    schematic.write_text("fixture", encoding="utf-8")
+    local_state = schematic.with_suffix(".kicad_prl")
+    if existing:
+        local_state.write_bytes(b"user-state")
+
+    def run(command: list[str], *, timeout: float = 60) -> subprocess.CompletedProcess[str]:
+        local_state.write_bytes(b"incidental-cli-state")
+        Path(command[command.index("--output") + 1]).write_bytes(b"pdf")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(kicad_cli, "_run", run)
+    kicad_cli.export_schematic_pdf(cli, schematic, tmp_path / "preview.pdf")
+
+    if existing:
+        assert local_state.read_bytes() == b"user-state"
+    else:
+        assert not local_state.exists()
+
+
 def test_export_schematic_pdf_requires_cli(tmp_path: Path) -> None:
     with pytest.raises(CopperbrainError, match="unavailable"):
         kicad_cli.export_schematic_pdf(None, tmp_path / "x.kicad_sch", tmp_path / "x.pdf")

@@ -25,6 +25,96 @@ _STRATEGIES = ("prioritized", "sequential")
 _NORMALIZATION_LOOP = "PolylineTrace.normalize: max normalization depth"
 
 
+def _sexpr_end(content: str, start: int) -> int:
+    """Return the exclusive end of one balanced DSN expression."""
+    if start >= len(content) or content[start] != "(":
+        raise ValueError("DSN expression must start with '('")
+    depth = 0
+    quoted = False
+    escaped = False
+    for index in range(start, len(content)):
+        character = content[index]
+        if quoted:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quoted = False
+            continue
+        if character == '"':
+            quoted = True
+        elif character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+            if depth < 0:
+                break
+    raise ValueError("DSN expression is unbalanced")
+
+
+def _expression_head(content: str, start: int) -> tuple[str, str | None]:
+    """Read the first two top-level atoms without interpreting nested DSN syntax."""
+
+    def atom(index: int) -> tuple[str, int]:
+        while index < len(content) and content[index].isspace():
+            index += 1
+        if index >= len(content) or content[index] in "()":
+            raise ValueError("DSN expression is missing an atom")
+        if content[index] == '"':
+            index += 1
+            value: list[str] = []
+            escaped = False
+            while index < len(content):
+                character = content[index]
+                index += 1
+                if escaped:
+                    value.append(character)
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == '"':
+                    return "".join(value), index
+                else:
+                    value.append(character)
+            raise ValueError("DSN quoted atom is unterminated")
+        end = index
+        while end < len(content) and not content[end].isspace() and content[end] not in "()":
+            end += 1
+        return content[index:end], end
+
+    tag, cursor = atom(start + 1)
+    try:
+        name, _ = atom(cursor)
+    except ValueError:
+        name = None
+    return tag, name
+
+
+def _network_children(content: str) -> tuple[tuple[int, int, str, str | None], ...]:
+    matches = tuple(re.finditer(r"(?m)^\s*\(network(?=\s|\()", content))
+    if len(matches) != 1:
+        raise ValueError("DSN must contain exactly one network expression")
+    network_start = content.find("(", matches[0].start())
+    network_end = _sexpr_end(content, network_start)
+    children: list[tuple[int, int, str, str | None]] = []
+    cursor = network_start + len("(network")
+    while cursor < network_end - 1:
+        character = content[cursor]
+        if character.isspace():
+            cursor += 1
+            continue
+        if character != "(":
+            raise ValueError("DSN network contains an unexpected atom")
+        child_end = _sexpr_end(content, cursor)
+        tag, name = _expression_head(content, cursor)
+        children.append((cursor, child_end, tag, name))
+        cursor = child_end
+    return tuple(children)
+
+
 @dataclass(frozen=True)
 class RoutedBoardCandidate:
     """One isolated board returned by an external routing backend."""
@@ -351,10 +441,46 @@ class FreeRoutingAdapter:
         return value[-limit:]
 
     @staticmethod
-    def _sanitize_dsn(path: Path) -> None:
+    def _sanitize_dsn(path: Path, target_nets: tuple[str, ...] = ()) -> None:
         content = path.read_text(encoding="utf-8", errors="strict")
         sanitized = re.sub("[ΩµΦ]", "", content)
         sanitized = re.sub(r"\A\(pcb\s+[^\r\n]+", f"(pcb {path.name}", sanitized, count=1)
+        if target_nets:
+            try:
+                children = _network_children(sanitized)
+            except ValueError as exc:
+                raise CopperbrainError(
+                    ErrorCode.VALIDATION_FAILED,
+                    "KiCad exported an unsupported Specctra network structure",
+                    details={"reason": str(exc)},
+                ) from exc
+            available = {name for _, _, tag, name in children if tag == "net" and name is not None}
+            missing = sorted(set(target_nets) - available)
+            if missing:
+                raise CopperbrainError(
+                    ErrorCode.VALIDATION_FAILED,
+                    "Requested routing nets are absent from the KiCad Specctra export",
+                    details={"missing_nets": missing},
+                )
+            target = set(target_nets)
+            removals = [
+                (start, end)
+                for start, end, tag, name in children
+                if tag == "net" and name not in target
+            ]
+            for start, end in reversed(removals):
+                sanitized = sanitized[:start] + sanitized[end:]
+            remaining = {
+                name
+                for _, _, tag, name in _network_children(sanitized)
+                if tag == "net" and name is not None
+            }
+            if remaining != target:
+                raise CopperbrainError(
+                    ErrorCode.VALIDATION_FAILED,
+                    "Specctra routing-net filtering did not preserve the exact requested set",
+                    details={"expected": sorted(target), "actual": sorted(remaining)},
+                )
         path.write_text(sanitized, encoding="utf-8", newline="\n")
 
     def route(
@@ -399,7 +525,7 @@ class FreeRoutingAdapter:
                 "KiCad failed to export the PCB as Specctra DSN",
                 details={"reason": self._tail(exported.stderr or exported.stdout)},
             )
-        self._sanitize_dsn(dsn)
+        self._sanitize_dsn(dsn, request.nets)
 
         thread_count = request.thread_count or max(1, (os.cpu_count() or 2) - 1)
         started = time.monotonic()

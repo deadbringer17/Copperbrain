@@ -19,6 +19,9 @@ copperbrain-output/
 
 # KiCad editor locks and generated fabrication outputs
 *.lck
+*.kicad_prl
+.history/
+*-backups/
 *.gbr
 *.drl
 *.zip

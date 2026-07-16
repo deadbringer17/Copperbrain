@@ -54,7 +54,10 @@ def test_compose_initializes_empty_board_from_typed_plan(
     pcb_layout.PcbLayoutAdapter().compose(
         board,
         tmp_path,
-        (Component(reference="R1", value="10k", footprint="Test:Part"),),
+        (
+            Component(reference="R1", value="10k", footprint="Test:Part"),
+            Component(reference="#FLG01", value="PWR_FLAG"),
+        ),
         (Net(name="/SIG", pins=(NetPin(reference="R1", pin="1"),)),),
         plan,
     )
@@ -90,7 +93,7 @@ def test_compose_refuses_populated_board_and_incomplete_plan(
         '(kicad_pcb (version 20240108) (generator pcbnew) (layers (0 "F.Cu" signal)))',
         encoding="utf-8",
     )
-    with pytest.raises(CopperbrainError, match="every schematic component"):
+    with pytest.raises(CopperbrainError, match="every schematic footprint"):
         adapter.compose(
             board,
             tmp_path,
