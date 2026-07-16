@@ -5,6 +5,8 @@ from pydantic import ValidationError
 
 from copperbrain.models import (
     ComponentCandidate,
+    GroundDomainRequest,
+    GroundingRequest,
     ManufacturingProfile,
     NetClassAssignment,
     NetClassRule,
@@ -86,6 +88,33 @@ def test_placement_contracts_reject_invalid_regions_and_duplicate_references() -
         PcbBounds(min_x_mm=1, min_y_mm=1, max_x_mm=1, max_y_mm=2)
     with pytest.raises(ValidationError, match="unique"):
         PlacementRequest(references=("R1", "R1"))
+
+
+def test_grounding_request_rejects_unsafe_vias_and_duplicate_layers() -> None:
+    with pytest.raises(ValidationError, match="drill"):
+        GroundingRequest(via_diameter_mm=0.3, via_drill_mm=0.3)
+    with pytest.raises(ValidationError, match="unique"):
+        GroundingRequest(layers=("F.Cu", "F.Cu"))
+    with pytest.raises(ValidationError, match="copper layer"):
+        GroundingRequest(layers=("F.SilkS",))
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        GroundingRequest(
+            net_name="GND",
+            domains=(GroundDomainRequest(net_name="PGND"),),
+        )
+    with pytest.raises(ValidationError, match="must not overlap"):
+        GroundingRequest(
+            copper_layers=4,
+            domains=(
+                GroundDomainRequest(net_name="GND", layers=("B.Cu",)),
+                GroundDomainRequest(net_name="PGND", layers=("B.Cu",)),
+            ),
+        )
+    assert GroundingRequest().copper_layers == 2
+    with pytest.raises(ValidationError, match="inner copper"):
+        GroundingRequest(layers=("In1.Cu",))
+    with pytest.raises(ValidationError, match="bridge references"):
+        GroundingRequest(bridge_references=("R0", "R0"))
 
 
 def test_layout_plan_rejects_duplicate_component_references() -> None:

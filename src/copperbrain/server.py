@@ -21,6 +21,7 @@ from copperbrain.models import (
     ComponentAssetBundle,
     ComponentCandidate,
     ErrorCode,
+    GroundingRequest,
     ManufacturingProfile,
     NetRuleRequirement,
     PcbLayoutPlan,
@@ -40,6 +41,7 @@ from copperbrain.services.changes import ChangeService
 from copperbrain.services.outputs import output_path
 from copperbrain.services.pcb_design import PcbDesignService
 from copperbrain.services.pcb_finalization import PcbFinalizationService
+from copperbrain.services.pcb_grounding import PcbGroundingService
 from copperbrain.services.pcb_layout import PcbLayoutService
 from copperbrain.services.pcb_routing import PcbRoutingService
 from copperbrain.services.pcb_rules import PcbRuleService
@@ -64,6 +66,7 @@ sourcing = SourcingService(
 changes = ChangeService(projects, settings.data_dir)
 pcb_rules = PcbRuleService(projects, settings.data_dir)
 pcb_design = PcbDesignService(projects, settings.data_dir)
+pcb_grounding = PcbGroundingService(projects, pcb_design, settings.data_dir)
 pcb_layout = PcbLayoutService(projects, settings.data_dir)
 pcb_routing = PcbRoutingService(
     projects,
@@ -304,6 +307,44 @@ def rollback_placement_change(
 ) -> dict[str, object]:
     """Restore the byte-exact PCB snapshot after explicit confirmation."""
     return pcb_design.rollback(
+        change_set_id, confirmed=confirmed, editor_closed=editor_closed
+    ).model_dump(mode="json")
+
+
+@mcp.tool()
+def grounding_pcb(session_id: str, request: dict[str, object] | None = None) -> dict[str, object]:
+    """Prepare two-layer-default shaped, bridge-connected ground domains in a private preview."""
+    normalized = GroundingRequest.model_validate(request or {})
+    return pcb_grounding.prepare(session_id, normalized).model_dump(mode="json")
+
+
+@mcp.tool()
+def validate_grounding_pcb(change_set_id: str) -> dict[str, object]:
+    """Reparse, inspect ground connectivity, and rerun DRC on a grounding preview."""
+    validation, drc, analysis = pcb_grounding.validate(change_set_id)
+    return {
+        "validation": validation.model_dump(mode="json"),
+        "drc": drc.model_dump(mode="json"),
+        "grounding_analysis": analysis.model_dump(mode="json"),
+    }
+
+
+@mcp.tool()
+def apply_grounding_pcb(
+    change_set_id: str, confirmed: bool, editor_closed: bool
+) -> dict[str, object]:
+    """Atomically apply validated GND planes after explicit confirmation."""
+    return pcb_grounding.apply(
+        change_set_id, confirmed=confirmed, editor_closed=editor_closed
+    ).model_dump(mode="json")
+
+
+@mcp.tool()
+def rollback_grounding_pcb(
+    change_set_id: str, confirmed: bool, editor_closed: bool
+) -> dict[str, object]:
+    """Restore the byte-exact pre-grounding PCB snapshot after confirmation."""
+    return pcb_grounding.rollback(
         change_set_id, confirmed=confirmed, editor_closed=editor_closed
     ).model_dump(mode="json")
 

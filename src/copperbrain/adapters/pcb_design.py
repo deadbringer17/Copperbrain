@@ -74,6 +74,8 @@ class _ParsedBoard:
     pads: tuple[PcbPadInspection, ...]
     segments: tuple[list[object], ...]
     vias: tuple[list[object], ...]
+    zones: tuple[list[object], ...]
+    copper_layers: tuple[str, ...]
 
 
 def _footprint_reference(node: list[object]) -> str | None:
@@ -190,10 +192,17 @@ def _absolute_point(
     return x + local_x * cosine + local_y * sine, y - local_x * sine + local_y * cosine
 
 
-def _copper_layers(form: list[object] | None) -> tuple[str, ...]:
+def _copper_layers(
+    form: list[object] | None,
+    board_layers: tuple[str, ...] = (),
+    *,
+    expand_through: bool = False,
+) -> tuple[str, ...]:
     raw = tuple(str(item) for item in form[1:]) if form else ()
     if "*.Cu" in raw:
-        return ("F.Cu", "B.Cu")
+        return board_layers or ("F.Cu", "B.Cu")
+    if expand_through and set(raw) == {"F.Cu", "B.Cu"}:
+        return board_layers or ("F.Cu", "B.Cu")
     return tuple(item for item in raw if item.endswith(".Cu"))
 
 
@@ -211,6 +220,29 @@ def _board_bounds(tree: list[object]) -> PcbBounds | None:
     if min_x >= max_x or min_y >= max_y:
         return None
     return PcbBounds(min_x_mm=min_x, min_y_mm=min_y, max_x_mm=max_x, max_y_mm=max_y)
+
+
+def _point_in_polygon(point: tuple[float, float], polygon: list[tuple[float, float]]) -> bool:
+    """Return whether a point lies in or on a simple polygon boundary."""
+    x, y = point
+    inside = False
+    previous = polygon[-1]
+    for current in polygon:
+        x1, y1 = previous
+        x2, y2 = current
+        cross = (x - x1) * (y2 - y1) - (y - y1) * (x2 - x1)
+        if (
+            abs(cross) <= 1e-9
+            and min(x1, x2) - 1e-9 <= x <= max(x1, x2) + 1e-9
+            and min(y1, y2) - 1e-9 <= y <= max(y1, y2) + 1e-9
+        ):
+            return True
+        if (y1 > y) != (y2 > y):
+            intersection = (x2 - x1) * (y - y1) / (y2 - y1) + x1
+            if x <= intersection:
+                inside = not inside
+        previous = current
+    return inside
 
 
 class PcbFileAdapter:
@@ -231,6 +263,12 @@ class PcbFileAdapter:
 
         net_names: dict[int, str] = {}
         net_codes_by_name: dict[str, int] = {}
+        layer_table = _first(tree, "layers")
+        board_copper_layers = tuple(
+            str(item[1])
+            for item in (layer_table[1:] if layer_table is not None else [])
+            if isinstance(item, list) and len(item) > 1 and str(item[1]).endswith(".Cu")
+        )
         footprints: list[PcbFootprintPlacement] = []
         pads: list[PcbPadInspection] = []
         pads_by_net: dict[int, list[str]] = {}
@@ -306,7 +344,11 @@ class PcbFileAdapter:
             for pad in _forms(node, "pad"):
                 resolved_code = net_code(_first(pad, "net"))
                 layers = _first(pad, "layers")
-                copper_layers = _copper_layers(layers)
+                copper_layers = _copper_layers(
+                    layers,
+                    board_copper_layers,
+                    expand_through=len(pad) > 2 and _name(pad[2]) == "thru_hole",
+                )
                 if not copper_layers:
                     continue
                 if resolved_code is not None:
@@ -330,7 +372,7 @@ class PcbFileAdapter:
                         width_mm=size[0],
                         height_mm=size[1],
                         rotation_deg=(rotation + pad_rotation) % 360,
-                        layers=copper_layers,  # type: ignore[arg-type]
+                        layers=copper_layers,
                     )
                 )
 
@@ -394,6 +436,8 @@ class PcbFileAdapter:
             pads=tuple(sorted(pads, key=lambda item: (item.net, item.reference, item.number))),
             segments=tuple(segment for items in tracks_by_net.values() for segment in items),
             vias=tuple(via for items in vias_by_net.values() for via in items),
+            zones=tuple(_forms(tree, "zone")),
+            copper_layers=board_copper_layers,
         )
 
     def summary(self, pcb: Path, session_id: str) -> PcbSummary:
@@ -412,6 +456,30 @@ class PcbFileAdapter:
         parsed = self.parse(pcb)
         selected = set(net_names)
         return tuple(item for item in parsed.pads if not selected or item.net in selected)
+
+    def ground_plane_layers(self, pcb: Path, net_name: str) -> tuple[str, ...]:
+        """Return copper layers containing a zone assigned to an exact net name."""
+        parsed = self.parse(pcb)
+        code_to_name = {item.code: item.net for item in parsed.nets.values()}
+        layers: set[str] = set()
+        for zone in parsed.zones:
+            named = _first(zone, "net_name")
+            net_form = _first(zone, "net")
+            resolved = (
+                str(named[1])
+                if named is not None and len(named) > 1
+                else _resolve_net_name(net_form[1], code_to_name)
+                if net_form is not None and len(net_form) > 1
+                else None
+            )
+            layer = _layer(zone)
+            if resolved == net_name and layer in parsed.copper_layers:
+                layers.add(layer)
+        return tuple(sorted(layers))
+
+    def copper_layers(self, pcb: Path) -> tuple[str, ...]:
+        """Return enabled copper layers in board stack order."""
+        return self.parse(pcb).copper_layers
 
     def routing_items(
         self, pcb: Path, net_names: tuple[str, ...] = ()
@@ -636,7 +704,9 @@ class PcbFileAdapter:
                 else None
             )
             if at and name in selected:
-                layers = _copper_layers(_first(via, "layers"))
+                layers = _copper_layers(
+                    _first(via, "layers"), parsed.copper_layers, expand_through=True
+                )
                 for layer in layers[1:]:
                     union(key(*at, layers[0]), key(*at, layer))
                 size = _number((_first(via, "size") or ["size", 0])[1])
@@ -677,6 +747,38 @@ class PcbFileAdapter:
                 )
                 if segment_intersects_pad(at, at, 0, synthetic):
                     union(pad_nodes[0], key(*at, next(iter(set(layers) & set(pad.layers)))))
+
+        # Filled or fillable zones connect every same-net pad, via, and segment anchor inside
+        # their typed polygon. This keeps post-grounding analysis from routing GND again.
+        for zone_index, zone in enumerate(parsed.zones):
+            named = _first(zone, "net_name")
+            net_form = _first(zone, "net")
+            name = (
+                str(named[1])
+                if named is not None and len(named) > 1
+                else _resolve_net_name(net_form[1], code_to_name)
+                if net_form is not None and len(net_form) > 1
+                else None
+            )
+            layer = _layer(zone)
+            polygon_form = _first(zone, "polygon")
+            polygon = _graphic_points(polygon_form) if polygon_form is not None else []
+            if name not in selected or layer not in parsed.copper_layers or len(polygon) < 3:
+                continue
+            anchor = key(-1_000_000 - zone_index, -1_000_000, layer)
+            for pad in pads_by_net.get(name, []):
+                if layer in pad.layers and _point_in_polygon((pad.x_mm, pad.y_mm), polygon):
+                    union(anchor, key(pad.x_mm, pad.y_mm, layer))
+            for via_name, at, _, layers in via_items:
+                if via_name == name and layer in layers and _point_in_polygon(at, polygon):
+                    union(anchor, key(*at, layer))
+            for segment_name, segment_layer, start, end, _, segment_node in segment_items:
+                if (
+                    segment_name == name
+                    and segment_layer == layer
+                    and (_point_in_polygon(start, polygon) or _point_in_polygon(end, polygon))
+                ):
+                    union(anchor, segment_node)
 
         connections: list[UnroutedConnection] = []
         routed_nets = 0
@@ -740,7 +842,7 @@ class PcbFileAdapter:
             ignored_single_pad_nets=tuple(sorted(ignored)),
             assumptions=(
                 "Connectivity is established from copper contact among rotated pads, tracks, "
-                "junctions, and vias",
+                "junctions, vias, and same-net copper zones",
                 "Single-pad nets do not require copper routing",
             ),
         )

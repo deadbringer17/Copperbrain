@@ -524,6 +524,9 @@ restano fuori scope.
 - Il round-trip usa `pcbnew.ExportSpecctraDSN` e `pcbnew.ImportSpecctraSES` nel Python distribuito
   con KiCad, sempre in workspace privato. Il risultato esterno viene ridotto a delta tipizzati
   `RouteSegment`/`RouteVia`; la rimozione o modifica di rame preesistente e rifiutata.
+- Una richiesta con `nets` vuoto viene normalizzata all'insieme esatto delle net attualmente
+  aperte prima dell'export DSN; il backend riceve sempre una selezione non vuota e non puo tentare
+  di modificare domini gia completi come `GND`/`PGND`.
 - Copperbrain puo eseguire configurazioni `prioritized` e `sequential`, misura completezza,
   regressioni DRC, lunghezza, segmenti e via, quindi sceglie il candidato con ranking
   deterministico. L'AI puo spiegare e valutare le evidenze, ma non puo superare i gate rigidi.
@@ -652,3 +655,68 @@ una richiesta esplicita. Il routing controllato opera comunque soltanto su `F.Cu
   richiesti prima di qualsiasi dichiarazione `production_ready`; le zone restano fuori dall'MVP.
 - [ ] Ogni apply al progetto sorgente richiede conferma esplicita, editor chiuso, hash non stale,
   snapshot e rollback secondo i workflow gia approvati.
+
+## 20. Estensione approvata — grounding PCB post-placement
+
+Questa estensione, approvata il 16 luglio 2026 e aggiornata nello stesso giorno, inserisce una fase controllata di grounding subito
+dopo l'applicazione del placement ottimizzato e prima del routing delle reti rimanenti. Non abilita
+poligoni arbitrari: il tool `grounding_pcb` deriva i piani esclusivamente dall'outline chiuso del
+board e da parametri tipizzati.
+
+### Contratti MCP
+
+| Tool | Tipo | Risultato essenziale |
+|---|---|---|
+| `grounding_pcb` | anteprima | domini di massa, fanout e vias tipizzati in workspace privato, PDF, DRC e analisi connettivita |
+| `validate_grounding_pcb` | lettura | parsing, copertura pad/layer, ponti fra domini e DRC comparativo |
+| `apply_grounding_pcb` | scrittura confermata | snapshot e sostituzione atomica dopo hash/editor check |
+| `rollback_grounding_pcb` | scrittura confermata | ripristino byte-per-byte del PCB precedente |
+
+### Regole di prodotto e sicurezza
+
+- La sequenza pubblica e `apply_placement_change -> grounding_pcb -> routing`; un placement con
+  errori blocca la preparazione del grounding.
+- Tutti i pad assegnati a ogni net di massa esatta selezionata sono inclusi. Il default e sempre
+  uno stackup a due layer `F.Cu/B.Cu`; il multistrato e ammesso soltanto con
+  `copper_layers=4` esplicito. Domini distinti come `GND` e `PGND` usano regioni sagomate e
+  ritagliate fra loro; il rame non li cortocircuita mai. La loro
+  connessione logica e ammessa soltanto attraverso componenti a due terminali esplicitamente
+  indicati in `bridge_references`, come una resistenza 0 ohm o un net-tie, e il grafo dei ponti
+  deve connettere tutti i domini. Il tool non deduce un ponte DC dal solo fatto che un componente
+  a due pin tocchi due masse.
+- Per la coppia non ambigua `GND`/`PGND`, la politica automatica a due layer assegna la regione
+  principale `PGND -> F.Cu` e `GND -> B.Cu`. Sul lato opposto ricava regioni locali
+  axis-aligned da pad, fanout e via; la regione principale viene sottratta della sagoma locale
+  dell'altra net piu la clearance. Le regioni locali usano priorita distinte e connessione solida.
+  Con `copper_layers=4` esplicito resta disponibile la separazione dedicata
+  `PGND -> F.Cu/In2.Cu` e `GND -> In1.Cu/B.Cu`.
+- I piani e le regioni sono ricavati da `Edge.Cuts` e dalla geometria tipizzata del PCB, rientrati
+  della clearance e riempiti mediante
+  l'API `pcbnew` inclusa in KiCad. Ogni dominio sceglie una connessione pad `thermal` o `solid`;
+  `PGND` puo usare `solid` per evitare thermal relief insufficienti sui pad di potenza.
+- I pad che non toccano direttamente il proprio piano ricevono fanout pad-via deterministici,
+  verificati contro geometria ruotata, pad, piste, vias, bordo e limite di larghezza pari all'80%
+  del pad. Le via-in-pad sono disabilitate di default e richiedono opt-in e revisione del processo
+  produttivo.
+- La sostituzione di zone di massa esistenti e rifiutata salvo `replace_existing_planes=true`;
+  anche in quel caso vengono rimosse soltanto zone appartenenti alle net di massa selezionate e la
+  sostituzione resta confinata alla preview fino alla conferma.
+- La connettivita delle zone entra nell'analisi delle reti, evitando che il router ripassi una GND
+  gia connessa dal piano.
+- Restano obbligatori workspace temporaneo, preview, DRC comparativo, conferma esplicita, editor
+  chiuso, hash anti-stale, snapshot, apply atomico e rollback.
+- Termica, return path, EMC, SI/PI, stackup, impedenza e DFM restano revisioni ingegneristiche non
+  certificate automaticamente.
+
+### Criteri di accettazione
+
+- [x] Il tool targetizza tutti i pad di uno o piu domini di massa selezionati.
+- [x] Il default riduce o conserva lo stackup a due layer; quattro layer richiedono opt-in.
+- [x] I domini multipli usano regioni sagomate non sovrapposte, fanout/vias tipizzati e un ponte
+  a due terminali revisionato; `GND` e `PGND` risultano connessi senza un corto rame fra net distinte.
+- [x] Connessioni pad `thermal`/`solid`, via-in-pad opt-in e sostituzione esplicita delle zone sono
+  validate dal contratto.
+- [x] Le zone seguono l'outline reale e sono riempite da KiCad 10.0.1.
+- [x] Il routing riconosce la connettivita fornita dalle zone applicate.
+- [x] Preview, DRC, conferma, stale check, snapshot e rollback restano obbligatori.
+- [x] Nessun testo S-expression o poligono arbitrario entra dai contratti MCP.

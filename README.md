@@ -84,6 +84,34 @@ Un cambio `F.Cu`/`B.Cu` viene eseguito soltanto nella copia temporanea attravers
 inclusa in KiCad, cosi pad, grafica, testi e modelli 3D vengono trasformati insieme. Preview, DRC,
 conferma esplicita, snapshot e rollback restano obbligatori.
 
+## Post-placement PCB grounding
+
+Immediately after the optimized placement has been applied, call `grounding_pcb`. It targets every
+pad in one or more reviewed ground domains and derives all zone outlines from the real closed
+`Edge.Cuts`, pad geometry, fanouts, and vias. The default is always a two-copper-layer board:
+`PGND` owns the main shaped region on `F.Cu`, while `GND` owns the main shaped region on `B.Cu`.
+Planner-derived local regions on the opposite side are cut out of the main region with explicit
+clearance and distinct priorities. A four-layer stackup is used only when
+`copper_layers=4` is explicitly requested; that opt-in policy uses `PGND -> F.Cu/In2.Cu` and
+`GND -> In1.Cu/B.Cu` for an unambiguous pair.
+
+The domains remain distinct KiCad nets and are connected only through two-terminal bridges such as
+a 0-ohm resistor or net tie explicitly named in `bridge_references`. Pads that do not touch their
+assigned plane receive
+typed, clearance-screened pad-to-via fanouts. `thermal` and `solid` pad connections are selectable
+per domain; local shaped regions are solid and power ground commonly uses `solid`. Via-in-pad is opt-in because it requires a reviewed
+fabrication process. Existing selected-net zones are replaced only when
+`replace_existing_planes=true` is explicitly requested.
+
+The result is only a private preview with comparative DRC and a grounding-connectivity report.
+Use `validate_grounding_pcb`, then `apply_grounding_pcb` with explicit confirmation and a saved,
+closed PCB Editor. The KiCad Project Manager may remain open: only a PCB document lock blocks the
+mutation. `rollback_grounding_pcb` restores the byte-exact pre-grounding board. Ambiguous
+domain roles, overlapping layer assignments, missing/ambiguous bridges, unsafe fanouts, or new DRC
+errors cause a structured refusal.
+The workflow does not accept polygons or KiCad expressions from callers, and it does not claim
+thermal, return-path, EMC, SI/PI, stackup, or DFM certification.
+
 ## Headless PCB initialization via MCP
 
 For an empty board, `prepare_pcb_layout_change` accepts a typed rectangular outline, one placement
@@ -106,11 +134,15 @@ motor stall behavior, and the final stackup still require engineering validation
 
 ## Controlled PCB routing via MCP
 
-After rules and placement are reviewed, use `analyze_unrouted_nets` to identify disconnected pad
-groups. Check `get_routing_backend_status`, then call `propose_pcb_routing`: a local FreeRouting
+After rules, placement, and `grounding_pcb` are reviewed and applied, use `analyze_unrouted_nets`
+to identify the remaining disconnected pad groups. Ground-zone connectivity is included, so the
+router does not redundantly route pads already joined by an applied plane. Check
+`get_routing_backend_status`, then call `propose_pcb_routing`: a local FreeRouting
 process consumes KiCad's official Specctra DSN, returns one or two isolated candidates, and
 Copperbrain deterministically ranks them by completion, new DRC errors, open connections, vias,
 and routed length. Only the selected candidate's copper delta becomes typed segments and vias.
+When `nets` is empty, Copperbrain materializes the exact currently-unrouted net set before DSN
+export, so already-complete ground domains and unrelated nets cannot enter the router implicitly.
 There is no implicit fallback to the former internal A* router.
 
 Pass the reviewed plan to `prepare_routing_change`. Copperbrain writes only a private copy,
@@ -120,7 +152,8 @@ rechecks selected-net connectivity, runs comparative KiCad DRC, exports
 `apply_routing_change`, explicit confirmation, and a closed editor. `rollback_routing_change`
 restores the byte-exact PCB snapshot. Prepared routing state is persisted below
 `COPPERBRAIN_DATA_DIR`, so validate/apply/rollback and `get_routing_change_summary` survive an MCP
-restart. Boards containing pre-existing copper are rejected by default; explicitly select the
+restart. The KiCad Project Manager may remain open; only a PCB-document lock blocks routing
+apply/rollback. Boards containing pre-existing copper are rejected by default; explicitly select the
 `preserve` policy only for intentional incremental routing. A wall-time/stall watchdog also stops
 known FreeRouting normalization loops and cleans up the Java process tree.
 

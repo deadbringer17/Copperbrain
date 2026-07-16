@@ -56,7 +56,7 @@ class _PreparedRouting:
 
 
 def _editor_lock_exists(root: Path) -> bool:
-    return any(root.glob("*.lck")) or any(root.glob(".*.lck"))
+    return any(root.glob("*.kicad_pcb.lck")) or any(root.glob(".*.kicad_pcb.lck"))
 
 
 def _atomic_copy(source: Path, destination: Path) -> None:
@@ -358,7 +358,7 @@ class PcbRoutingService:
                         end_x_mm=escape[0],
                         end_y_mm=escape[1],
                         width_mm=pad_limit,
-                        layer=pad.layers[0],
+                        layer=pad.layers[0],  # type: ignore[arg-type]
                     )
                 )
         for index, (left_pad, left_width, _) in enumerate(fine_pads):
@@ -382,7 +382,7 @@ class PcbRoutingService:
                         end_x_mm=right_pad.x_mm,
                         end_y_mm=right_pad.y_mm,
                         width_mm=min(left_width, right_width),
-                        layer=left_pad.layers[0],
+                        layer=left_pad.layers[0],  # type: ignore[arg-type]
                     )
                 )
         groups: dict[
@@ -516,6 +516,7 @@ class PcbRoutingService:
                 details={"reason": status.reason or "unknown"},
             )
         target_nets = tuple(sorted({item.net for item in analysis.unrouted_connections}))
+        request = request.model_copy(update={"nets": target_nets})
         baseline_drc = self.drc_runner(pcb)
         strategies = ("prioritized", "sequential")[: request.candidate_count]
         evaluated: list[

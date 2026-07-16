@@ -70,6 +70,10 @@ def test_server_exposes_complete_mvp_contract() -> None:
         "validate_placement_change",
         "apply_placement_change",
         "rollback_placement_change",
+        "grounding_pcb",
+        "validate_grounding_pcb",
+        "apply_grounding_pcb",
+        "rollback_grounding_pcb",
         "export_pcb_preview",
         "get_routing_backend_status",
         "analyze_unrouted_nets",
@@ -183,6 +187,18 @@ def test_pcb_design_transport_wrappers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server.pcb_design, "apply", lambda *args, **kwargs: Dump())
     monkeypatch.setattr(server.pcb_design, "rollback", lambda *args, **kwargs: Dump())
     monkeypatch.setattr(server.pcb_design, "export_preview", lambda session: Path("preview.pdf"))
+    monkeypatch.setattr(server.pcb_grounding, "prepare", lambda *args: Dump())
+    monkeypatch.setattr(
+        server.pcb_grounding,
+        "validate",
+        lambda change: (
+            ValidationReport(valid=True),
+            DrcReport(available=True),
+            Dump({"complete": True}),
+        ),
+    )
+    monkeypatch.setattr(server.pcb_grounding, "apply", lambda *args, **kwargs: Dump())
+    monkeypatch.setattr(server.pcb_grounding, "rollback", lambda *args, **kwargs: Dump())
     assert server.get_pcb_summary("s")["summary"]
     assert server.inspect_pcb_net("s", "GND")["net"] == "GND"
     assert server.get_footprint_placement("s", "R1")["reference"] == "R1"
@@ -197,6 +213,10 @@ def test_pcb_design_transport_wrappers(monkeypatch: pytest.MonkeyPatch) -> None:
     assert server.validate_placement_change("c")["validation"]["valid"]
     assert server.apply_placement_change("c", True, True)["ok"]
     assert server.rollback_placement_change("c", True, True)["ok"]
+    assert server.grounding_pcb("s", {"allow_vias": True})["ok"]
+    assert server.validate_grounding_pcb("c")["grounding_analysis"]["complete"]
+    assert server.apply_grounding_pcb("c", True, True)["ok"]
+    assert server.rollback_grounding_pcb("c", True, True)["ok"]
     assert server.export_pcb_preview("s")["preview_pdf"] == "preview.pdf"
 
 

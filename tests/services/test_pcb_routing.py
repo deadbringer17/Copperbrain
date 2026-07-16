@@ -30,6 +30,7 @@ class FakeRoutingBackend:
     def route(
         self, pcb: Path, workspace: Path, request: RoutingRequest, strategy: str
     ) -> RoutedBoardCandidate:
+        assert request.nets == ("GND",)
         workspace.mkdir(parents=True)
         routed = workspace / "routed.kicad_pcb"
         shutil.copy2(pcb, routed)
@@ -105,6 +106,7 @@ def test_propose_prepare_apply_and_byte_exact_rollback(
     assert analysis.unrouted_connection_count == 1
     plan = service.propose(session, RoutingRequest())
     assert plan.target_nets == ("GND",)
+    assert plan.request.nets == ("GND",)
     assert plan.segments
 
     change = service.prepare(session, plan)
@@ -115,9 +117,16 @@ def test_propose_prepare_apply_and_byte_exact_rollback(
     assert service.validate(change.id)[0].valid
     with pytest.raises(CopperbrainError, match="confirmation"):
         service.apply(change.id, confirmed=False, editor_closed=True)
+    project_manager_lock = pcb.parent / "~routing.kicad_pro.lck"
+    project_manager_lock.write_text("project manager open", encoding="utf-8")
     applied = service.apply(change.id, confirmed=True, editor_closed=True)
     assert applied.status is ChangeStatus.APPLIED
     assert service.analyze(session).complete
+    pcb_editor_lock = pcb.parent / "~routing.kicad_pcb.lck"
+    pcb_editor_lock.write_text("pcb editor open", encoding="utf-8")
+    with pytest.raises(CopperbrainError, match="safely closed"):
+        service.rollback(change.id, confirmed=True, editor_closed=True)
+    pcb_editor_lock.unlink()
     rolled_back = service.rollback(change.id, confirmed=True, editor_closed=True)
     assert rolled_back.status is ChangeStatus.ROLLED_BACK
     assert pcb.read_bytes() == original

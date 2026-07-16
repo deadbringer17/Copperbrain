@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -519,7 +520,16 @@ class PcbPadInspection(FrozenModel):
     width_mm: Annotated[float, Field(gt=0)]
     height_mm: Annotated[float, Field(gt=0)]
     rotation_deg: float = 0
-    layers: Annotated[tuple[Literal["F.Cu", "B.Cu"], ...], Field(min_length=1)]
+    layers: Annotated[tuple[str, ...], Field(min_length=1)]
+
+    @field_validator("layers")
+    @classmethod
+    def copper_layers_only(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(
+            re.fullmatch(r"(?:F|B|In(?:[1-9]|[12][0-9]|30))\.Cu", item) is None for item in value
+        ):
+            raise ValueError("pad layers must be copper layer names")
+        return value
 
 
 class UnroutedConnection(FrozenModel):
@@ -577,6 +587,254 @@ class RouteVia(FrozenModel):
         if self.layers[0] == self.layers[1]:
             raise ValueError("via layers must differ")
         return self
+
+
+class GroundDomainRequest(FrozenModel):
+    """One reviewed ground domain and its optional primary/dedicated copper layers."""
+
+    net_name: str = Field(min_length=1, max_length=128)
+    layers: Annotated[tuple[str, ...], Field(max_length=32)] = ()
+    pad_connection: Literal["thermal", "solid"] = "thermal"
+
+    @model_validator(mode="after")
+    def valid_domain(self) -> GroundDomainRequest:
+        if not self.net_name.strip():
+            raise ValueError("ground domain net name must not be empty")
+        if len(self.layers) != len(set(self.layers)):
+            raise ValueError("ground domain layers must be unique")
+        if any(
+            re.fullmatch(r"(?:F|B|In(?:[1-9]|[12][0-9]|30))\.Cu", item) is None
+            for item in self.layers
+        ):
+            raise ValueError("ground domain layers must be copper layer names")
+        return self
+
+
+class GroundingRequest(FrozenModel):
+    """Typed intent for one plane or multiple bridge-connected ground domains."""
+
+    copper_layers: Literal[2, 4] = 2
+    net_name: str | None = None
+    domains: Annotated[tuple[GroundDomainRequest, ...], Field(max_length=32)] = ()
+    layers: Annotated[tuple[str, ...], Field(max_length=32)] = ()
+    bridge_references: Annotated[tuple[str, ...], Field(max_length=32)] = ()
+    replace_existing_planes: bool = False
+    edge_clearance_mm: Annotated[float, Field(gt=0)] = 0.5
+    clearance_mm: Annotated[float, Field(ge=0)] = 0.2
+    min_thickness_mm: Annotated[float, Field(gt=0)] = 0.25
+    thermal_gap_mm: Annotated[float, Field(gt=0)] = 0.3
+    thermal_spoke_width_mm: Annotated[float, Field(gt=0)] = 0.3
+    region_margin_mm: Annotated[float, Field(gt=0)] = 0.8
+    fanout_width_mm: Annotated[float, Field(gt=0)] = 0.2
+    allow_vias: bool = True
+    allow_via_in_pad: bool = False
+    via_diameter_mm: Annotated[float, Field(gt=0)] = 0.6
+    via_drill_mm: Annotated[float, Field(gt=0)] = 0.3
+    via_spacing_mm: Annotated[float, Field(gt=0)] = 10.0
+    max_stitching_vias: Annotated[int, Field(ge=0, le=512)] = 64
+
+    @model_validator(mode="after")
+    def valid_grounding_request(self) -> GroundingRequest:
+        if self.net_name is not None and not self.net_name.strip():
+            raise ValueError("ground net name must not be empty")
+        if self.net_name is not None and self.domains:
+            raise ValueError("net_name and domains are mutually exclusive")
+        domain_names = tuple(item.net_name for item in self.domains)
+        if len(domain_names) != len(set(domain_names)):
+            raise ValueError("ground domain net names must be unique")
+        if len(self.bridge_references) != len(set(self.bridge_references)):
+            raise ValueError("ground bridge references must be unique")
+        if any(
+            re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,63}", item) is None
+            for item in self.bridge_references
+        ):
+            raise ValueError("ground bridge references are invalid")
+        if len(self.layers) != len(set(self.layers)):
+            raise ValueError("ground plane layers must be unique")
+        if any(
+            re.fullmatch(r"(?:F|B|In(?:[1-9]|[12][0-9]|30))\.Cu", item) is None
+            for item in self.layers
+        ):
+            raise ValueError("ground plane layers must be copper layer names")
+        explicit_domain_layers = tuple(layer for item in self.domains for layer in item.layers)
+        if self.layers and explicit_domain_layers:
+            raise ValueError("global layers cannot be combined with per-domain layers")
+        if self.copper_layers == 4 and len(explicit_domain_layers) != len(
+            set(explicit_domain_layers)
+        ):
+            raise ValueError("dedicated ground domain layers must not overlap")
+        requested_layers = (*self.layers, *explicit_domain_layers)
+        if self.copper_layers == 2 and any(item.startswith("In") for item in requested_layers):
+            raise ValueError("two-layer grounding cannot target inner copper layers")
+        if self.via_drill_mm >= self.via_diameter_mm:
+            raise ValueError("via drill must be smaller than via diameter")
+        if (
+            self.allow_vias
+            and (len(self.layers) > 1 or len(self.domains) > 1)
+            and self.max_stitching_vias == 0
+        ):
+            raise ValueError("multi-layer grounding with vias requires a positive via limit")
+        return self
+
+
+class GroundBridge(FrozenModel):
+    """Reviewed two-terminal component joining two otherwise separate ground domains."""
+
+    reference: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
+    net_a: str
+    pad_a: str
+    net_b: str
+    pad_b: str
+
+    @model_validator(mode="after")
+    def different_nets(self) -> GroundBridge:
+        if self.net_a == self.net_b:
+            raise ValueError("a ground bridge must join different nets")
+        return self
+
+
+class GroundZoneRegion(FrozenModel):
+    """A planner-derived board region or axis-aligned local copper region."""
+
+    layer: str
+    kind: Literal["board", "local"]
+    min_x_mm: float | None = None
+    min_y_mm: float | None = None
+    max_x_mm: float | None = None
+    max_y_mm: float | None = None
+
+    @model_validator(mode="after")
+    def valid_region(self) -> GroundZoneRegion:
+        if re.fullmatch(r"(?:F|B|In(?:[1-9]|[12][0-9]|30))\.Cu", self.layer) is None:
+            raise ValueError("ground region layer must be a copper layer")
+        bounds = (self.min_x_mm, self.min_y_mm, self.max_x_mm, self.max_y_mm)
+        if self.kind == "board":
+            if any(item is not None for item in bounds):
+                raise ValueError("board ground regions derive their outline from Edge.Cuts")
+            return self
+        if self.layer not in {"F.Cu", "B.Cu"}:
+            raise ValueError("local shaped ground regions require an outer copper layer")
+        if any(item is None for item in bounds):
+            raise ValueError("local ground regions require complete bounds")
+        min_x, min_y, max_x, max_y = bounds
+        assert min_x is not None and min_y is not None and max_x is not None and max_y is not None
+        if min_x >= max_x or min_y >= max_y:
+            raise ValueError("local ground region bounds must have positive area")
+        return self
+
+
+class GroundDomainPlan(FrozenModel):
+    """Primary plane, shaped regions, and deterministic fanout for one exact ground net."""
+
+    net_name: str
+    primary_layer: str
+    plane_layers: Annotated[tuple[str, ...], Field(min_length=1, max_length=32)]
+    regions: Annotated[tuple[GroundZoneRegion, ...], Field(min_length=1, max_length=512)]
+    pad_connection: Literal["thermal", "solid"] = "thermal"
+    replaced_plane_layers: tuple[str, ...] = ()
+    fanout_segments: tuple[RouteSegment, ...] = ()
+    vias: tuple[RouteVia, ...] = ()
+    target_pad_count: Annotated[int, Field(ge=1)]
+    target_references: Annotated[tuple[str, ...], Field(min_length=1)]
+    planes_connected: bool
+
+    @model_validator(mode="after")
+    def valid_domain_plan(self) -> GroundDomainPlan:
+        if len(self.plane_layers) != len(set(self.plane_layers)):
+            raise ValueError("ground plane layers must be unique")
+        if any(
+            re.fullmatch(r"(?:F|B|In(?:[1-9]|[12][0-9]|30))\.Cu", item) is None
+            for item in (*self.plane_layers, *self.replaced_plane_layers)
+        ):
+            raise ValueError("ground plane layers must be copper layer names")
+        if self.primary_layer not in self.plane_layers:
+            raise ValueError("ground primary layer must belong to its plane layers")
+        if set(item.layer for item in self.regions) != set(self.plane_layers):
+            raise ValueError("ground region layers must match the planned plane layers")
+        if not any(item.kind == "board" for item in self.regions):
+            raise ValueError("each ground domain requires at least one board region")
+        if not any(
+            item.kind == "board" and item.layer == self.primary_layer for item in self.regions
+        ):
+            raise ValueError("the primary ground layer must contain the board region")
+        if any(item.net != self.net_name for item in self.vias):
+            raise ValueError("all grounding vias must belong to their domain net")
+        if any(item.net != self.net_name for item in self.fanout_segments):
+            raise ValueError("all grounding fanouts must belong to their domain net")
+        if len(self.plane_layers) > 1 and not self.planes_connected:
+            raise ValueError("ground planes on multiple layers must be electrically connected")
+        return self
+
+
+class GroundingPlan(FrozenModel):
+    """Deterministic shaped ground domains derived from placed PCB geometry."""
+
+    session_id: str
+    request: GroundingRequest
+    domains: Annotated[tuple[GroundDomainPlan, ...], Field(min_length=1, max_length=32)]
+    bridges: tuple[GroundBridge, ...] = ()
+    evidence: tuple[str, ...] = ()
+    assumptions: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def valid_grounding_plan(self) -> GroundingPlan:
+        names = tuple(item.net_name for item in self.domains)
+        if len(names) != len(set(names)):
+            raise ValueError("grounding plan domain nets must be unique")
+        board_region_layers = tuple(
+            region.layer
+            for domain in self.domains
+            for region in domain.regions
+            if region.kind == "board"
+        )
+        if len(board_region_layers) != len(set(board_region_layers)):
+            raise ValueError("only one ground domain may own the board region on a layer")
+        if any(item.net_a not in names or item.net_b not in names for item in self.bridges):
+            raise ValueError("ground bridge nets must belong to planned domains")
+        if len(self.domains) > 1 and not self.bridges:
+            raise ValueError("multiple ground domains require reviewed bridges")
+        return self
+
+
+class GroundDomainAnalysis(FrozenModel):
+    net_name: str
+    complete: bool
+    target_pad_count: Annotated[int, Field(ge=0)]
+    connected_references: tuple[str, ...] = ()
+    zone_layers: tuple[str, ...] = ()
+    via_count: Annotated[int, Field(ge=0)] = 0
+    fanout_segment_count: Annotated[int, Field(ge=0)] = 0
+    unrouted_connection_count: Annotated[int, Field(ge=0)] = 0
+    missing_pad_references: tuple[str, ...] = ()
+    planes_connected: bool = False
+
+
+class GroundingAnalysis(FrozenModel):
+    session_id: str
+    complete: bool
+    domains: Annotated[tuple[GroundDomainAnalysis, ...], Field(min_length=1)]
+    bridge_references: tuple[str, ...] = ()
+    bridges_connected: bool = False
+    assumptions: tuple[str, ...] = ()
+
+
+class PcbGroundingChangeSet(FrozenModel):
+    id: str
+    session_id: str
+    project_hash: str
+    plan: GroundingPlan
+    affected_files: tuple[Path, ...]
+    source_hashes: dict[str, str]
+    semantic_diff: tuple[str, ...]
+    risks: tuple[str, ...]
+    validation_report: ValidationReport
+    drc: DrcReport
+    grounding_analysis: GroundingAnalysis
+    preview_directory: Path
+    preview_pdf: Path | None = None
+    status: ChangeStatus = ChangeStatus.PREPARED
+    snapshot_id: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class RoutingRequest(FrozenModel):
