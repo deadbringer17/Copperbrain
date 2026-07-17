@@ -88,6 +88,10 @@ def test_placement_contracts_reject_invalid_regions_and_duplicate_references() -
         PcbBounds(min_x_mm=1, min_y_mm=1, max_x_mm=1, max_y_mm=2)
     with pytest.raises(ValidationError, match="unique"):
         PlacementRequest(references=("R1", "R1"))
+    assert (
+        PlacementRequest(references=("U1",), strategy="routing_coherent").strategy
+        == "routing_coherent"
+    )
 
 
 def test_grounding_request_rejects_unsafe_vias_and_duplicate_layers() -> None:

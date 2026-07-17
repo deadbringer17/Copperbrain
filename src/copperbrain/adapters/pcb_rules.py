@@ -127,6 +127,9 @@ def render_managed_rules(rule_set: PcbRuleSet) -> str:
     """Render only allowlisted constraints from typed values."""
     lines = [MANAGED_BEGIN, "# Generated from typed Copperbrain constraints; do not edit here."]
     for rule in rule_set.classes:
+        role = rule_set.class_roles.get(rule.name)
+        if role is not None:
+            lines.append(f"# Copperbrain netclass-role {rule.name} {role}")
         lines.extend(
             [
                 f'(rule "Copperbrain_{rule.name}"',
@@ -184,6 +187,26 @@ def render_managed_rules(rule_set: PcbRuleSet) -> str:
         )
     lines.append(MANAGED_END)
     return "\n".join(lines)
+
+
+def read_managed_roles(rule_file: Path) -> dict[str, str]:
+    """Read explicit netclass roles emitted by the typed rule workflow."""
+    if not rule_file.is_file():
+        return {}
+    content = rule_file.read_text(encoding="utf-8")
+    if MANAGED_BEGIN not in content or MANAGED_END not in content:
+        return {}
+    managed = content.split(MANAGED_BEGIN, 1)[1].split(MANAGED_END, 1)[0]
+    roles: dict[str, str] = {}
+    pattern = re.compile(
+        r"^# Copperbrain netclass-role (?P<class>[A-Za-z][A-Za-z0-9_-]{0,63}) "
+        r"(?P<role>signal|power|high_current|high_voltage|differential|switching)$"
+    )
+    for line in managed.splitlines():
+        match = pattern.fullmatch(line.strip())
+        if match:
+            roles[match.group("class")] = match.group("role")
+    return dict(sorted(roles.items()))
 
 
 def read_managed_widths(rule_file: Path) -> tuple[dict[str, float], dict[str, float]]:

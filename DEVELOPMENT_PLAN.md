@@ -428,12 +428,23 @@ da questa estensione.
   workspace privato, PDF progetto, DRC comparativo, hash anti-stale, snapshot e rollback.
 - Apply e rollback richiedono editor salvato e chiuso. Il progetto live non cambia durante analisi,
   proposta, preparazione o validazione.
-- Spostamento e rotazione sul lato corrente restano disponibili tramite file adapter. I cambi lato
+- Gli spostamenti puramente traslazionali sul lato corrente restano disponibili tramite file
+  adapter. Cambi di rotazione o lato
   `F.Cu`/`B.Cu` passano esclusivamente da un worker a comando fisso basato sull'API `pcbnew` di
-  KiCad, che trasforma in modo coordinato pad, grafica, testi e modelli 3D nella copia temporanea.
+  KiCad, che trasforma in modo coordinato pad, grafica, testi, esclusioni e modelli 3D nella copia
+  temporanea.
 - La proposta compatta usa connettivita e coordinate pad, valuta rotazioni ortogonali e inviluppo,
   mantiene i connettori verso il bordo e riserva corridoi maggiori alle reti di potenza inferite.
   Il bottom automatico e limitato ai piccoli passivi SMD; THT, IC e potenza conservano il lato.
+- `PlacementRequest.strategy="routing_coherent"` abilita esplicitamente uno scoring pre-routing che
+  aumenta il peso di reti di potenza e critiche, penalizza connessioni lunghe e footprint che
+  ostruiscono i corridoi, e usa `power_corridor_mm` per riservare spazio alle piste larghe. Le reti
+  high-current generano inoltre un albero minimo globale di corridoi riservati: anche un componente
+  non connesso a quelle reti viene spostato ai lati invece di occupare il futuro percorso di potenza.
+- `PlacementRequest.existing_copper_policy="preserve_anchors"` mantiene fissi i footprint gia
+  collegati a piste o via e rifilla le zone nella copia di preview prima del DRC comparativo.
+  `anchor_ground_copper=false` consente esplicitamente di rigenerare i soli fan-out GND/PGND,
+  continuando a preservare gli ancoraggi delle reti di potenza e segnale.
 
 ### Criteri di accettazione
 
@@ -505,7 +516,8 @@ restano fuori scope.
 
 | Tool | Tipo | Risultato essenziale |
 |---|---|---|
-| `get_routing_backend_status` | lettura | disponibilita locale di Java, FreeRouting e bridge Python KiCad |
+| `get_routing_backend_status` | lettura | disponibilita e capability del runtime FreeRouting locale |
+| `get_connectivity_metrics` | lettura | riepilogo bounded correlato, confronto batch sulla stessa baseline, produttivita e budget pass suggerito |
 | `analyze_unrouted_nets` | lettura | gruppi di pad elettricamente disconnessi per rete |
 | `propose_pcb_routing` | lettura | candidati FreeRouting tipizzati, valutati e ordinati deterministicamente |
 | `prepare_routing_change` | anteprima | PCB temporaneo, diff, PDF, connettivita e DRC comparativo |
@@ -518,20 +530,43 @@ restano fuori scope.
 
 - Il confine pubblico accetta soltanto `RoutingRequest`, `RoutingPlan`, `RouteSegment` e
   `RouteVia`; non accetta S-expression o condizioni KiCad libere.
-- `PcbRoutingService` orchestra un backend specializzato locale e non implementa il pathfinding.
+- `PcbRoutingService` orchestra esclusivamente FreeRouting e non implementa pathfinding.
   `FreeRoutingAdapter` usa soltanto comandi fissi, Java locale e il JAR configurato; nessun comando
-  o argomento eseguibile viene accettato dal confine MCP.
+  o argomento eseguibile viene accettato dal confine MCP e non esiste fallback interno.
 - Il round-trip usa `pcbnew.ExportSpecctraDSN` e `pcbnew.ImportSpecctraSES` nel Python distribuito
-  con KiCad, sempre in workspace privato. Il risultato esterno viene ridotto a delta tipizzati
+  con KiCad, sempre in workspace privato, e rigenera i riempimenti zona prima del DRC. Il risultato esterno viene ridotto a delta tipizzati
   `RouteSegment`/`RouteVia`; la rimozione o modifica di rame preesistente e rifiutata.
 - Una richiesta con `nets` vuoto viene normalizzata all'insieme esatto delle net attualmente
-  aperte prima dell'export DSN; il backend riceve sempre una selezione non vuota e non puo tentare
-  di modificare domini gia completi come `GND`/`PGND`.
+  aperte prima dell'export DSN. Per FreeRouting, net, piani e rame fuori scope restano nel DSN come
+  geometria coerente e le classi miste vengono separate deterministicamente per validare lo scope.
+  Il CLI upstream di FreeRouting 2.2.4 analizza `-inc` ma non lo propaga alla board headless.
+  Copperbrain abilita i sottoinsiemi soltanto per un JAR accompagnato da una capability hash-bound
+  che certifica l'esclusione headless; altrimenti rifiuta prima di avviare Java. Classificazioni mancanti o
+  ambigue, rimozioni di rame e nuovo rame fuori scope causano anch'essi un rifiuto strutturato.
 - Copperbrain puo eseguire configurazioni `prioritized` e `sequential`, misura completezza,
   regressioni DRC, lunghezza, segmenti e via, quindi sceglie il candidato con ranking
   deterministico. L'AI puo spiegare e valutare le evidenze, ma non puo superare i gate rigidi.
-- FreeRouting e opzionale e rilevato dinamicamente. La sua assenza produce un errore strutturato
-  con istruzioni di configurazione, senza fallback implicito al precedente A* lento.
+- I ruoli rete provengono prima dai requisiti tipizzati persistiti nelle regole gestite; un ruolo
+  esplicito nella richiesta puo restringere ulteriormente il batch. I nomi rete restano soltanto
+  un fallback dichiarato quando manca evidenza revisionata nelle regole.
+- Il watchdog semantico arresta FreeRouting dopo il numero configurato di passate completate senza
+  riduzione delle connessioni aperte, senza attendere il solo timeout di inattivita. Una sessione
+  parziale importabile viene analizzata come candidato diagnostico `applicable=false` e non puo
+  essere selezionata o applicata.
+- Le connessioni aperte sono raggruppate in hotspot geometrici locali. Quando un gruppo contiene
+  piu airwire, la proposta espone i footprint interessati e raccomanda un nuovo placement
+  preview-first prima di altri tentativi generici.
+- FreeRouting e opzionale e rilevato dinamicamente. La sua assenza o una capability insufficiente
+  produce un errore strutturato con istruzioni di configurazione, senza avviare altri router.
+- Ogni proposta persiste una baseline e un record JSON versionato per candidato sotto la directory
+  dati privata `metrics/connectivity/`, con fingerprint del progetto, configurazione effettiva,
+  connettivita, DRC, geometria, tempi, watchdog e telemetria FreeRouting per passata: totale board,
+  elementi realmente accodati, fallimenti, score, CPU, memoria e normalizzazioni. Il
+  `metrics_run_id` del piano correla tramite `parent_run_id` prepare, validate, apply e rollback,
+  inclusi gli esiti negativi. Lo schema 4 aggiunge rame prodotto al secondo, connessioni risolte
+  per passata, candidati diagnostici, confronto fra batch con lo stesso fingerprint baseline e un
+  suggerimento deterministico di `max_passes` dal corpus storico; la lettura resta compatibile con
+  gli schemi 2 e 3 gia persistiti.
 - La proposta dell'autorouter non dichiara da sola la fabbricabilita. Il change set diventa
   applicabile solo se il parser accetta il PCB, le reti richieste risultano complete e KiCad DRC
   non introduce nuovi errori.
@@ -551,9 +586,14 @@ restano fuori scope.
 - [x] Rollback ripristina il `.kicad_pcb` byte-per-byte.
 - [x] Java, JAR FreeRouting e Python KiCad sono rilevati senza path macchina hard-coded.
 - [x] Il bridge DSN/SES opera headless in workspace privato e non modifica il progetto sorgente.
-- [x] Il delta importato e tipizzato e rifiuta rimozioni di rame o layer non supportati.
+- [x] Il delta importato e tipizzato, rifiuta rimozioni di rame e accetta soltanto layer rame
+  dichiarati dalla board, inclusi `In1.Cu`--`In30.Cu` nei progetti multistrato.
+- [x] Il round-trip tollera soltanto arrotondamenti Specctra entro 1 um e rigenera le zone prima del DRC.
 - [x] Due configurazioni candidate possono essere valutate con ranking riproducibile e strutturato.
-- [x] L'assenza del backend restituisce un errore azionabile e non avvia il router A* interno.
+- [x] L'assenza di FreeRouting restituisce un errore azionabile e non seleziona altri router.
+- [x] FreeRouting a sottoinsiemi viene rifiutato quando il CLI non puo applicare le classi preserve.
+- [x] Nuovo rame fuori scope e rimozioni di rame preesistente sono rifiutati.
+- [x] Baseline, candidati riusciti e candidati falliti producono metriche JSON private versionate.
 
 ## 17. Hardening approvato — finalizzazione PCB persistente e readiness
 
@@ -634,7 +674,8 @@ tipo motore, natura degli I/O e stackup. Il template non e una certificazione di
 
 La creazione di un nuovo progetto usa due layer di rame per default. Un singolo layer e riservato
 a progetti esplicitamente minimali e non e generato dal workflow corrente; quattro layer richiedono
-una richiesta esplicita. Il routing controllato opera comunque soltanto su `F.Cu` e `B.Cu`.
+una richiesta esplicita. Il routing controllato puo importare rame solo sui layer dichiarati dalla
+board e validati dal contratto tipizzato.
 
 ### Gate e limiti
 
@@ -720,3 +761,39 @@ board e da parametri tipizzati.
 - [x] Il routing riconosce la connettivita fornita dalle zone applicate.
 - [x] Preview, DRC, conferma, stale check, snapshot e rollback restano obbligatori.
 - [x] Nessun testo S-expression o poligono arbitrario entra dai contratti MCP.
+
+## 21. Estensione approvata — benchmark BLDC compatto DRV8311S
+
+La richiesta del 17 luglio 2026 approva il reference design deterministico
+`benchmark_bldc_drv8311`: un driver BLDC integrato entro 100 x 60 mm, sviluppato tramite i workflow
+tipizzati gia approvati. Non abilita la generazione autonoma illimitata di circuiti e non attenua i
+gate di readiness.
+
+### Topologia e assunzioni revisionabili
+
+- DRV8311S WQFN-24 con tre half-bridge integrati, comando 6-PWM, SPI, fault e tre uscite CSA;
+- ingresso provvisorio 9--12,6 V, target termico provvisorio 2 A continui e 3 A per il dimensionamento
+  iniziale delle piste; il picco del dispositivo non e una corrente continua certificata;
+- connettore Hall 3,3 V/A/B/C/GND, interfaccia controller 2x10 a passo 1,27 mm e morsettiera U/V/W;
+- PTC 4 A da selezionare sul motore reale, TVS SMBJ14CA e decoupling locale;
+- PCB 85 x 50 mm, quattro layer, rame assunto 35 um, piano GND su In1.Cu e via-in-pad esplicita sul
+  thermal pad, soggetta a revisione DFM del processo di riempimento/cappatura.
+
+### Evidenza e limiti
+
+- [x] Schematico, outline, placement, regole, grounding e batch Hall sono stati preparati, validati
+  e applicati tramite operation/change set tipizzati con snapshot.
+- [x] ERC non ha errori; placement 100/100; il batch Hall e completo e non introduce errori DRC.
+- [x] Il corpus metriche registra il limite iniziale sui layer interni, il successo dopo
+  l'estensione tipizzata, un batch digitale fermato per stagnazione e i tentativi per-rete senza
+  delta utile.
+- [x] La messa in tavola dello schematico usa zone funzionali sull'A3 e stub tipizzati da 10,16 mm:
+  le label direttamente sui pin, le posizioni duplicate e le sovrapposizioni stimate devono essere
+  zero prima che la preview risulti validata. Il test opera su una copia privata del benchmark e
+  confronta anche area occupata, spaziatura minima, parser KiCad ed ERC comparativo.
+- [x] Il tool read-only `get_connectivity_metrics` espone segnali di ottimizzazione bounded e
+  sanitizzati, mantenendo compatibilita di lettura schema 2/3.
+- [ ] Restano 45 connessioni aperte. Reti fase/potenza, PWM, analogiche e controllo richiedono
+  ripartizionamento o routing dedicato; non sono state forzate dopo ripetuta stagnazione.
+- [ ] Termica/SOA, PI, EMC, stackup, DFM, via-in-pad, creepage e selezione definitiva dei componenti
+  devono essere approvati prima di qualsiasi `production_ready=true`.

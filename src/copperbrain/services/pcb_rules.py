@@ -459,6 +459,7 @@ class PcbRuleService:
             manufacturing=profile,
             classes=tuple(classes),
             assignments=tuple(assignments),
+            class_roles={item.name: item.role for item in requirements},
             fanout_constraints=tuple(fanouts),
             courtyard_additions=tuple(courtyards),
             evidence=tuple(

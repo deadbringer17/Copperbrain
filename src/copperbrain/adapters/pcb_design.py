@@ -509,10 +509,10 @@ class PcbFileAdapter:
             layer = _layer(item)
             if net is None or start is None or end is None or (selected and net not in selected):
                 continue
-            if layer not in {"F.Cu", "B.Cu"}:
+            if layer not in parsed.copper_layers:
                 raise CopperbrainError(
                     ErrorCode.VALIDATION_FAILED,
-                    "Controlled routing supports only F.Cu and B.Cu",
+                    "Controlled routing encountered a segment on a disabled copper layer",
                     details={"layer": layer},
                 )
             segments.append(
@@ -523,7 +523,7 @@ class PcbFileAdapter:
                     end_x_mm=round(end[0], 6),
                     end_y_mm=round(end[1], 6),
                     width_mm=_number(width[1]) if width and len(width) > 1 else 0.25,
-                    layer=layer,  # type: ignore[arg-type]
+                    layer=layer,
                 )
             )
         vias: list[RouteVia] = []
@@ -539,10 +539,10 @@ class PcbFileAdapter:
             layers = _copper_layers(_first(item, "layers"))
             if net is None or position is None or (selected and net not in selected):
                 continue
-            if set(layers) != {"F.Cu", "B.Cu"}:
+            if len(layers) != 2 or any(layer not in parsed.copper_layers for layer in layers):
                 raise CopperbrainError(
                     ErrorCode.VALIDATION_FAILED,
-                    "Controlled routing supports only through vias between F.Cu and B.Cu",
+                    "Controlled routing encountered a via on disabled copper layers",
                     details={"layers": list(layers)},
                 )
             vias.append(
@@ -552,7 +552,7 @@ class PcbFileAdapter:
                     y_mm=round(position[1], 6),
                     diameter_mm=_number(size[1]) if size and len(size) > 1 else 0.6,
                     drill_mm=_number(drill[1]) if drill and len(drill) > 1 else 0.3,
-                    layers=("F.Cu", "B.Cu"),
+                    layers=(layers[0], layers[1]),
                 )
             )
         return (
@@ -966,6 +966,16 @@ class PcbFileAdapter:
                 ErrorCode.NOT_FOUND,
                 "Routing operations reference unknown nets",
                 details={"nets": missing},
+            )
+        requested_layers = {item.layer for item in segments} | {
+            layer for item in vias for layer in item.layers
+        }
+        missing_layers = sorted(requested_layers - set(parsed.copper_layers))
+        if missing_layers:
+            raise CopperbrainError(
+                ErrorCode.INVALID_INPUT,
+                "Routing operations reference copper layers not enabled on the PCB",
+                details={"layers": missing_layers},
             )
         if parsed.summary.board_bounds is not None:
             bounds = parsed.summary.board_bounds

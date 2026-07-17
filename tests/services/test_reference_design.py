@@ -2,6 +2,11 @@ import pytest
 
 from copperbrain.models import ComponentCandidate
 from copperbrain.services.reference_design import (
+    bldc_driver_bench_layout_plan,
+    bldc_driver_bench_manufacturing_profile,
+    bldc_driver_bench_operations,
+    bldc_driver_bench_rule_requirements,
+    bldc_schematic_readability_operations,
     five_volt_buck_operations,
     forty_eight_to_twelve_operations,
     motor_driver_bench_layout_plan,
@@ -162,3 +167,66 @@ def test_motor_driver_benchmark_rejects_incompatible_power_parts() -> None:
     )
     with pytest.raises(ValueError, match="DRV8701E"):
         motor_driver_bench_operations(invalid, invalid, invalid)
+
+
+def test_bldc_driver_benchmark_is_compact_three_phase_and_reviewable() -> None:
+    driver = ComponentCandidate(
+        lcsc="UNSOURCED",
+        mpn="DRV8311SRRWR",
+        manufacturer="Texas Instruments",
+        description="3-phase BLDC driver with integrated FETs and SPI",
+        package="WQFN-24",
+        stock=0,
+        source="Texas Instruments",
+    )
+
+    operations = bldc_driver_bench_operations(driver)
+    added = {item.target for item in operations if item.kind == "add_component"}
+    labels = {str(item.parameters.get("text")) for item in operations if item.kind == "label"}
+    readability = bldc_schematic_readability_operations(driver)
+
+    assert {"U1", "J1", "J2", "J3", "J4", "F1", "D1"} <= added
+    assert {"PHASE_A", "PHASE_B", "PHASE_C", "VM", "GND", "AVDD"} <= labels
+    assert {"PWM_AH", "PWM_AL", "PWM_BH", "PWM_BL", "PWM_CH", "PWM_CL"} <= labels
+    assert {"SPI_SCLK", "SPI_MOSI", "SPI_MISO", "SPI_CS_N", "FAULT_N"} <= labels
+    assert {"ISENSE_A", "ISENSE_B", "ISENSE_C", "HALL_A", "HALL_B", "HALL_C"} <= labels
+    assert sum(item.kind == "relayout_pin_label" for item in operations) == 99
+    assert sum(item.kind == "move_component" for item in readability) == 28
+    assert sum(item.kind == "relayout_pin_label" for item in readability) == 99
+    assert any(
+        item.kind == "update_property"
+        and item.target == "U1"
+        and item.parameters.get("name") == "DesignNote"
+        and "PROVISIONAL" in str(item.parameters.get("value"))
+        for item in operations
+    )
+
+    layout = bldc_driver_bench_layout_plan()
+    assert (layout.outline.width_mm, layout.outline.height_mm) == (85, 50)
+    assert layout.outline.width_mm <= 100
+    assert layout.outline.height_mm <= 60
+    assert len(layout.mounting_holes) == 4
+    assert {item.reference for item in layout.placements} == {
+        reference for reference in added if not reference.startswith("#")
+    }
+    assert sum(item.layer == "B.Cu" for item in layout.placements) >= 10
+
+    profile = bldc_driver_bench_manufacturing_profile()
+    requirements = bldc_driver_bench_rule_requirements()
+    assert profile.copper_thickness_um == 35
+    high_current = next(item for item in requirements if item.name == "CB_BLDC_POWER")
+    assert high_current.current_a == 3
+    assert {"/PHASE_A", "/PHASE_B", "/PHASE_C"} <= set(high_current.nets)
+    assert any(item.name == "CB_BLDC_CSA" for item in requirements)
+
+
+def test_bldc_driver_benchmark_rejects_incompatible_driver() -> None:
+    invalid = ComponentCandidate(
+        lcsc="C1",
+        mpn="WRONG",
+        manufacturer="Acme",
+        description="wrong",
+        package="SOP",
+    )
+    with pytest.raises(ValueError, match="DRV8311S"):
+        bldc_driver_bench_operations(invalid)

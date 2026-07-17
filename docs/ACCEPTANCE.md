@@ -6,7 +6,7 @@ KiCad 10, JLCImport, and JLCPCB Tools are all detected and exercised.
 
 | Criterion | Evidence |
 |---|---|
-| Local MCP client can discover the server | `tests/test_server.py` verifies all 58 core and approved-extension FastMCP tools; `copperbrain` starts stdio only |
+| Local MCP client can discover the server | `tests/test_server.py` verifies all 63 core and approved-extension FastMCP tools; `copperbrain` starts stdio only |
 | KiCad 10.x and both JLC plugins are detected | `tests/adapters/test_kicad_detection.py`; real detection reports KiCad 10, JLCImport, and JLCPCB Tools |
 | Existing project analyzed read-only | `tests/integration/test_kicad_workflow.py` exports a real KiCad 10 netlist without touching the source |
 | History and backup copies excluded | `tests/services/test_projects.py` proves `.history`, `*-backups`, and generated output schematics are never selected as sources |
@@ -74,22 +74,24 @@ KiCad 10, JLCImport, and JLCPCB Tools are all detected and exercised.
 | Criterion | Evidence |
 |---|---|
 | Typed connectivity and operations | `tests/adapters/test_pcb_routing_adapter.py` verifies open-net detection and allowlisted segment writing |
-| Fixed-command specialized backend | `tests/adapters/test_freerouting.py` verifies Java/JAR/KiCad-Python status, DSN sanitization, bounded arguments, and unavailable-backend refusal |
-| Exact requested-net scope | FreeRouting adapter regressions remove unrelated DSN nets and refuse requested nets absent from the KiCad export before Java starts |
-| Typed import and KiCad 9/10 compatibility | `tests/adapters/test_pcb_routing_adapter.py` verifies numeric and name-valued copper nets plus allowlisted segment/via extraction |
-| Deterministic candidate evaluation | `tests/services/test_pcb_routing.py` verifies typed deltas, same-stem project-rule DRC context, metrics, and stable ranking |
+| Fixed-command specialized backend | `tests/adapters/test_freerouting.py` verifies Java/JAR/KiCad-Python status, DSN sanitization, bounded arguments, hash-bound capability validation, and unavailable-backend refusal |
+| Exact requested-net scope | FreeRouting adapter regressions retain all DSN nets/planes, split non-target members into preserve classes, pass verified class exclusions, and refuse absent targets or an incapable/tampered JAR before routing starts |
+| Zone and precision-safe round trip | FreeRouting adapter tests cover the fixed refill command; routing service tests accept only sub-micron Specctra rounding while still rejecting actual existing-copper changes, and comparative DRC runs after KiCad zone refill |
+| Typed import and KiCad 9/10 compatibility | `tests/adapters/test_pcb_routing_adapter.py` verifies numeric and name-valued copper nets plus allowlisted segment/via extraction on declared outer and inner copper layers |
+| Deterministic candidate evaluation | `tests/services/test_pcb_routing.py` verifies typed deltas, rule-first role classification, diagnostic-only partial candidates, local hotspot evidence, schema-2 compatibility, stable ranking, throughput metrics, same-baseline comparison, and historical pass advice |
 | Source remains unchanged before confirmation | Routing service test compares live PCB bytes through proposal, prepare, and validation |
 | Connectivity and comparative DRC gate | Service validation requires selected nets complete and rejects new DRC errors |
 | Confirmation, editor, and stale checks | Service tests cover missing confirmation and stale source refusal; shared workflow rejects lock files |
 | Byte-exact rollback | Service test applies routing and restores the original `.kicad_pcb` bytes |
-| Public MCP contract | `tests/test_server.py` checks all eight routing wrappers, including snapshot recovery, and request/plan validation |
+| Public MCP contract | `tests/test_server.py` checks the routing wrappers, metric readback, snapshot recovery, and request/plan validation |
 
 ## Routing hardening and finalization evidence
 
 | Criterion | Evidence |
 |---|---|
 | Restart-safe routing lifecycle | `tests/services/test_pcb_routing.py` prepares, validates, applies, and rolls back through fresh service instances using the persisted manifest |
-| Autorouter loop containment | `tests/adapters/test_freerouting.py` proves the watchdog stops the known normalization-loop signature and returns structured evidence |
+| Autorouter loop containment | `tests/adapters/test_freerouting.py` proves normalization and semantic no-improvement watchdogs stop boundedly and return structured per-pass evidence |
+| Correlated lifecycle evidence | `tests/services/test_pcb_routing.py` verifies prepare, validate, apply, and rollback records point to the proposal through `parent_run_id` |
 | Safe incremental-routing default | Routing service regression rejects pre-existing copper unless the caller explicitly selects `preserve` |
 | Output copies never become sources | Project/output tests reject opening or publishing recursively below `copperbrain-output/` |
 | Honest production-readiness state | `tests/services/test_pcb_finalization.py` proves clean electrical checks remain `production_ready=false` while engineering/DFM gates are unassessed |
@@ -105,6 +107,18 @@ KiCad 10, JLCImport, and JLCPCB Tools are all detected and exercised.
 | Imported footprint geometry is safe to analyze | `tests/adapters/test_footprint_geometry.py` covers rotation, custom primitives, duplicate/same-net pads, chamfered corners, and conversion tolerances |
 | Accidental net merges block apply | `tests/services/test_changes.py` treats new `multiple_net_names` ERC warnings as blocking regressions |
 | Routing limits remain honest | The layout contract reports open connections; readiness remains false until routing, power copper, thermal, EMC, stackup, and DFM are assessed |
+
+## Compact BLDC benchmark evidence
+
+| Criterion | Evidence |
+|---|---|
+| Typed reference generation | `tests/services/test_reference_design.py` verifies the DRV8311S topology, 6-PWM/SPI/CSA/Hall interfaces, protection, and provisional 9--12.6 V operating assumptions |
+| Envelope and placement | The typed plan contains all 26 physical circuit references plus four M3 holes inside an 85 x 50 mm four-layer outline; live placement analysis scores 100/100 |
+| Grounding and rules | The live project has one reviewed In1.Cu GND region, explicit thermal-pad via-in-pad fanout, 0.15 mm manufacturing minima, and separate power/PWM/CSA/control intents |
+| Reusable routing evidence | Schema-3 private records capture the successful Hall batch and bounded digital failures; `get_connectivity_metrics` exposes optimization signals without project paths or net names |
+| Honest stop condition | Readiness remains blocked with 45 open connections after repeated scoped-router stagnation/no-delta results; high-current phase/power paths were not sent blindly through generic routing |
+| Readable schematic presentation | `tests/services/test_schematic_readability.py` applies only typed move/label-stub operations to a private benchmark copy and requires every label to terminate on a wire, zero pin-attached labels, duplicate label positions, or estimated label overlaps, broader A3 use, and unchanged source bytes |
+| Readability-gated preview | `tests/services/test_changes.py` and the benchmark preview workflow require the structured readability report alongside parser and comparative ERC gates before a schematic layout change is validated |
 
 ## Validation gate
 

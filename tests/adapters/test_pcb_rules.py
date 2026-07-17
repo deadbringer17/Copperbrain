@@ -5,6 +5,7 @@ from copperbrain.adapters.pcb_rules import (
     MANAGED_BEGIN,
     PcbRuleAdapter,
     migrate_managed_pair_rules,
+    read_managed_roles,
     read_managed_widths,
     read_netclasses,
     stage_router_project,
@@ -37,6 +38,7 @@ def rule_set() -> PcbRuleSet:
             ),
         ),
         assignments=(NetClassAssignment(net="/+5V", netclass="PWR_2A"),),
+        class_roles={"PWR_2A": "high_current"},
     )
 
 
@@ -73,6 +75,7 @@ def test_adapter_writes_typed_netclasses_and_managed_rules(tmp_path: Path) -> No
     class_widths, fanout_widths = read_managed_widths(rules)
     assert class_widths == {"PWR_2A": 1.0}
     assert fanout_widths == {}
+    assert read_managed_roles(rules) == {"PWR_2A": "high_current"}
 
     staged = tmp_path / "router.kicad_pro"
     stage_router_project(project, staged, class_widths)

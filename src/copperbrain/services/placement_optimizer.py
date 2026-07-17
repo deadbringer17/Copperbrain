@@ -14,6 +14,30 @@ from copperbrain.models import (
     PcbSummary,
     PlacementOperation,
     PlacementRequest,
+    RouteSegment,
+    RouteVia,
+)
+
+_POWER_NET_NAMES = {
+    "MOTOR_A",
+    "MOTOR_B",
+    "PGND",
+    "SHUNT_POWER",
+    "VBAT",
+    "VBAT_RAW",
+    "VMOTOR",
+}
+_CRITICAL_NET_TOKENS = (
+    "GATE",
+    "GH",
+    "GL",
+    "RS485",
+    "SENSE",
+    "PWM",
+    "DIR",
+    "VCP",
+    "CPH",
+    "CPL",
 )
 
 
@@ -33,6 +57,135 @@ def _overlap(left: PcbBounds, right: PcbBounds, margin: float) -> bool:
         or left.max_y_mm + margin <= right.min_y_mm
         or right.max_y_mm + margin <= left.min_y_mm
     )
+
+
+def _is_power_net(net: str) -> bool:
+    leaf_name = net.upper().rsplit("/", maxsplit=1)[-1]
+    return leaf_name in _POWER_NET_NAMES
+
+
+def _is_critical_net(net: str) -> bool:
+    upper = net.upper()
+    return _is_power_net(net) or any(token in upper for token in _CRITICAL_NET_TOKENS)
+
+
+def _connection_weight(net: str, reference_count: int, *, coherent: bool) -> float:
+    weight = 1.0 / max(1, reference_count - 1)
+    if _is_power_net(net):
+        return weight * (8 if coherent else 2)
+    if coherent and _is_critical_net(net):
+        return weight * 4
+    if coherent and reference_count == 2:
+        return weight * 2
+    return weight
+
+
+def _segment_intersects_bounds(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    bounds: PcbBounds,
+    margin: float,
+) -> bool:
+    """Return whether a routing-centerline crosses an inflated footprint envelope."""
+    min_x = bounds.min_x_mm - margin
+    min_y = bounds.min_y_mm - margin
+    max_x = bounds.max_x_mm + margin
+    max_y = bounds.max_y_mm + margin
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    lower, upper = 0.0, 1.0
+    for origin, delta, minimum, maximum in (
+        (start[0], dx, min_x, max_x),
+        (start[1], dy, min_y, max_y),
+    ):
+        if abs(delta) < 1e-12:
+            if origin < minimum or origin > maximum:
+                return False
+            continue
+        near = (minimum - origin) / delta
+        far = (maximum - origin) / delta
+        if near > far:
+            near, far = far, near
+        lower = max(lower, near)
+        upper = min(upper, far)
+        if lower > upper:
+            return False
+    return True
+
+
+def copper_anchored_references(
+    pads: tuple[PcbPadInspection, ...],
+    segments: tuple[RouteSegment, ...],
+    vias: tuple[RouteVia, ...],
+    *,
+    ignored_nets: frozenset[str] = frozenset(),
+) -> tuple[str, ...]:
+    """Identify footprints whose pads already touch typed track or via copper."""
+    anchored: set[str] = set()
+    for pad in pads:
+        if not pad.net or pad.net in ignored_nets:
+            continue
+        pad_radius = math.hypot(pad.width_mm, pad.height_mm) / 2
+        center = (pad.x_mm, pad.y_mm)
+        if any(
+            segment.net == pad.net
+            and segment.layer in pad.layers
+            and _point_segment_distance(center, segment) <= pad_radius + segment.width_mm / 2 + 1e-6
+            for segment in segments
+        ) or any(
+            via.net == pad.net
+            and math.dist(center, (via.x_mm, via.y_mm)) <= pad_radius + via.diameter_mm / 2 + 1e-6
+            for via in vias
+        ):
+            anchored.add(pad.reference)
+    return tuple(sorted(anchored))
+
+
+def _point_segment_distance(point: tuple[float, float], segment: RouteSegment) -> float:
+    start = (segment.start_x_mm, segment.start_y_mm)
+    end = (segment.end_x_mm, segment.end_y_mm)
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    length_squared = dx * dx + dy * dy
+    if length_squared == 0:
+        return math.dist(point, start)
+    fraction = max(
+        0.0,
+        min(
+            1.0,
+            ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / length_squared,
+        ),
+    )
+    projection = (start[0] + fraction * dx, start[1] + fraction * dy)
+    return math.dist(point, projection)
+
+
+def copper_conflicting_references(
+    pads: tuple[PcbPadInspection, ...],
+    segments: tuple[RouteSegment, ...],
+    vias: tuple[RouteVia, ...],
+    *,
+    clearance_mm: float = 0.2,
+) -> tuple[str, ...]:
+    """Identify moved pads that would collide with foreign existing copper."""
+    conflicting: set[str] = set()
+    for pad in pads:
+        if not pad.net:
+            continue
+        pad_radius = math.hypot(pad.width_mm, pad.height_mm) / 2
+        center = (pad.x_mm, pad.y_mm)
+        if any(
+            segment.net != pad.net
+            and segment.layer in pad.layers
+            and _point_segment_distance(center, segment)
+            < pad_radius + segment.width_mm / 2 + clearance_mm
+            for segment in segments
+        ) or any(
+            via.net != pad.net
+            and math.dist(center, (via.x_mm, via.y_mm))
+            < pad_radius + via.diameter_mm / 2 + clearance_mm
+            for via in vias
+        ):
+            conflicting.add(pad.reference)
+    return tuple(sorted(conflicting))
 
 
 def _bounds(
@@ -234,17 +387,16 @@ def optimize_placement(
     for pad in pads:
         if pad.net:
             net_references[pad.net].add(pad.reference)
+    coherent = request.strategy == "routing_coherent"
     adjacency: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    pair_net_counts: dict[frozenset[str], int] = defaultdict(int)
     priority_pairs: set[frozenset[str]] = set()
     for net, references in net_references.items():
         if len(references) < 2:
             continue
-        weight = 1.0 / max(1, len(references) - 1)
-        priority_net = any(
-            token in net.upper() for token in ("MOTOR", "VBAT", "VMOTOR", "SHUNT", "PGND")
-        )
+        weight = _connection_weight(net, len(references), coherent=coherent)
+        priority_net = _is_power_net(net)
         if priority_net:
-            weight *= 2
             ordered_priority = sorted(references)
             priority_pairs.update(
                 frozenset((left, right))
@@ -254,8 +406,57 @@ def optimize_placement(
         ordered = sorted(references)
         for index, left in enumerate(ordered):
             for right in ordered[index + 1 :]:
+                pair_net_counts[frozenset((left, right))] += 1
                 adjacency[left][right] += weight
                 adjacency[right][left] += weight
+    if coherent:
+        for pair, count in pair_net_counts.items():
+            if count < 2:
+                continue
+            left, right = sorted(pair)
+            shared_function_boost = count * (count - 1) * 2.0
+            adjacency[left][right] += shared_function_boost
+            adjacency[right][left] += shared_function_boost
+
+    reserved_power_corridors: list[
+        tuple[str, tuple[float, float], tuple[float, float], frozenset[str]]
+    ] = []
+    if coherent:
+        for net, references in sorted(net_references.items()):
+            if not _is_power_net(net) or len(references) < 2:
+                continue
+            points_by_reference = {
+                reference: (
+                    sum(item.x_mm for item in pads_by_reference[reference])
+                    / len(pads_by_reference[reference]),
+                    sum(item.y_mm for item in pads_by_reference[reference])
+                    / len(pads_by_reference[reference]),
+                )
+                for reference in references
+                if pads_by_reference[reference]
+            }
+            if len(points_by_reference) < 2:
+                continue
+            tree_references = {min(points_by_reference)}
+            remaining = set(points_by_reference) - tree_references
+            while remaining:
+                left, right = min(
+                    ((left, right) for left in tree_references for right in remaining),
+                    key=lambda pair: (
+                        math.dist(points_by_reference[pair[0]], points_by_reference[pair[1]]),
+                        pair,
+                    ),
+                )
+                reserved_power_corridors.append(
+                    (
+                        net,
+                        points_by_reference[left],
+                        points_by_reference[right],
+                        frozenset((left, right)),
+                    )
+                )
+                tree_references.add(right)
+                remaining.remove(right)
 
     fixed = {reference: item for reference, item in footprints.items() if reference not in selected}
     placed: dict[str, PlacementOperation] = {}
@@ -303,6 +504,18 @@ def optimize_placement(
                 (target_x, target_y),
                 ((region.min_x_mm + region.max_x_mm) / 2, (region.min_y_mm + region.max_y_mm) / 2),
             }
+            for _, start, end, endpoint_references in reserved_power_corridors:
+                if reference in endpoint_references:
+                    continue
+                dx, dy = end[0] - start[0], end[1] - start[1]
+                length = math.hypot(dx, dy)
+                if length <= 1e-9:
+                    continue
+                midpoint = ((start[0] + end[0]) / 2, (start[1] + end[1]) / 2)
+                offset = request.power_corridor_mm + max(width, height) / 2 + request.spacing_mm
+                normal = (-dy / length, dx / length)
+                points.add((midpoint[0] + normal[0] * offset, midpoint[1] + normal[1] * offset))
+                points.add((midpoint[0] - normal[0] * offset, midpoint[1] - normal[1] * offset))
             for other in other_footprints.values():
                 corridor = max(request.spacing_mm, request.routing_corridor_mm)
                 if frozenset((reference, other.reference)) in priority_pairs:
@@ -403,6 +616,22 @@ def optimize_placement(
                         continue
                     net_cost = 0.0
                     layer_cost = 0.0
+                    obstruction_cost = 0.0
+                    board_diagonal = math.hypot(
+                        region.max_x_mm - region.min_x_mm,
+                        region.max_y_mm - region.min_y_mm,
+                    )
+                    if coherent:
+                        for _, start, end, endpoint_references in reserved_power_corridors:
+                            if reference in endpoint_references:
+                                continue
+                            if _segment_intersects_bounds(
+                                start,
+                                end,
+                                bounds,
+                                request.power_corridor_mm / 2,
+                            ):
+                                obstruction_cost += board_diagonal * 50
                     for candidate_pad in candidate_pads:
                         connected = [
                             item
@@ -411,13 +640,47 @@ def optimize_placement(
                         ]
                         if not connected or not candidate_pad.net:
                             continue
-                        weight = 1.0 / max(1, len(net_references[candidate_pad.net]) - 1)
-                        net_cost += weight * min(
-                            math.dist(
-                                (candidate_pad.x_mm, candidate_pad.y_mm), (item.x_mm, item.y_mm)
-                            )
-                            for item in connected
+                        weight = _connection_weight(
+                            candidate_pad.net,
+                            len(net_references[candidate_pad.net]),
+                            coherent=coherent,
                         )
+                        nearest = min(
+                            connected,
+                            key=lambda item: math.dist(
+                                (candidate_pad.x_mm, candidate_pad.y_mm),
+                                (item.x_mm, item.y_mm),
+                            ),
+                        )
+                        distance = math.dist(
+                            (candidate_pad.x_mm, candidate_pad.y_mm),
+                            (nearest.x_mm, nearest.y_mm),
+                        )
+                        if coherent:
+                            shared_net_count = pair_net_counts[
+                                frozenset((reference, nearest.reference))
+                            ]
+                            weight *= max(1, shared_net_count * shared_net_count)
+                        net_cost += weight * distance
+                        if coherent:
+                            net_cost += weight * distance * distance / max(board_diagonal, 1)
+                            corridor = (
+                                request.power_corridor_mm
+                                if _is_power_net(candidate_pad.net)
+                                else request.routing_corridor_mm
+                            )
+                            for obstacle in other_footprints.values():
+                                if obstacle.reference == nearest.reference:
+                                    continue
+                                if _segment_intersects_bounds(
+                                    (candidate_pad.x_mm, candidate_pad.y_mm),
+                                    (nearest.x_mm, nearest.y_mm),
+                                    obstacle.bounds,
+                                    corridor / 2,
+                                ):
+                                    obstruction_cost += weight * (
+                                        board_diagonal if _is_power_net(candidate_pad.net) else 6
+                                    )
                         if not any(
                             set(candidate_pad.layers) & set(item.layers) for item in connected
                         ):
@@ -442,7 +705,24 @@ def optimize_placement(
                             region.max_y_mm - bounds.max_y_mm,
                         )
                     back_penalty = 0.2 if layer == "B.Cu" and footprint.layer != "B.Cu" else 0
-                    score = net_cost + layer_cost + compact_cost + edge_cost + back_penalty
+                    seed_cost = 0.0
+                    if coherent and not anchors:
+                        seed_cost = 4 * math.dist(
+                            (x, y),
+                            (
+                                (region.min_x_mm + region.max_x_mm) / 2,
+                                (region.min_y_mm + region.max_y_mm) / 2,
+                            ),
+                        )
+                    score = (
+                        net_cost
+                        + layer_cost
+                        + obstruction_cost
+                        + compact_cost
+                        + edge_cost
+                        + back_penalty
+                        + seed_cost
+                    )
                     key = (round(score, 9), x, y, rotation, layer)
                     if best is None or key < best:
                         best = key

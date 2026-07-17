@@ -76,6 +76,7 @@ def test_server_exposes_complete_mvp_contract() -> None:
         "rollback_grounding_pcb",
         "export_pcb_preview",
         "get_routing_backend_status",
+        "get_connectivity_metrics",
         "analyze_unrouted_nets",
         "propose_pcb_routing",
         "prepare_routing_change",
@@ -245,7 +246,12 @@ def test_pcb_layout_transport_wrappers(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_pcb_routing_transport_wrappers(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(server.pcb_routing, "backend_status", lambda: Dump({"available": True}))
+    monkeypatch.setattr(
+        server.pcb_routing,
+        "backend_status",
+        lambda *args: Dump({"available": True}),
+    )
+    monkeypatch.setattr(server.pcb_routing, "metrics_for_run", lambda *args: Dump())
     monkeypatch.setattr(server.pcb_routing, "analyze", lambda *args: Dump({"complete": False}))
     monkeypatch.setattr(server.pcb_routing, "propose", lambda *args: Dump())
     monkeypatch.setattr(server.pcb_routing, "prepare", lambda *args: Dump())
@@ -268,6 +274,7 @@ def test_pcb_routing_transport_wrappers(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(server.pcb_finalization, "apply", lambda *args, **kwargs: Dump())
     monkeypatch.setattr(server.pcb_finalization, "report", lambda *args: Dump())
     assert server.get_routing_backend_status()["available"]
+    assert server.get_connectivity_metrics("a" * 32)["ok"]
     assert not server.analyze_unrouted_nets("s")["complete"]
     request = {"nets": ["GND"], "default_track_width_mm": 0.25}
     assert server.propose_pcb_routing("s", request)["ok"]

@@ -12,10 +12,15 @@ from copperbrain.errors import CopperbrainError
 from copperbrain.models import (
     ChangeStatus,
     DrcReport,
+    ErrorCode,
+    FreeRoutingPassMetric,
     IntegrationStatus,
+    PcbPadInspection,
     RouteSegment,
+    RoutingAnalysis,
     RoutingBackendStatus,
     RoutingRequest,
+    UnroutedConnection,
 )
 from copperbrain.services.pcb_routing import PcbRoutingService
 from copperbrain.services.projects import ProjectService
@@ -26,6 +31,9 @@ FIXTURE = Path("tests/fixtures/kicad10_placement/placement.kicad_pcb")
 class FakeRoutingBackend:
     def status(self) -> RoutingBackendStatus:
         return RoutingBackendStatus(available=True, version="test")
+
+    def refill_zones(self, pcb: Path) -> None:
+        assert pcb.is_file()
 
     def route(
         self, pcb: Path, workspace: Path, request: RoutingRequest, strategy: str
@@ -52,6 +60,42 @@ class FakeRoutingBackend:
             strategy="prioritized",
             pcb=routed,
             elapsed_seconds=0.01,
+            pass_metrics=(
+                FreeRoutingPassMetric(
+                    pass_number=1,
+                    board_incomplete_count=1,
+                    queued_item_count=1,
+                    board_unrouted_count=0,
+                    duration_seconds=0.01,
+                ),
+            ),
+        )
+
+
+class FailingRoutingBackend:
+    def status(self) -> RoutingBackendStatus:
+        return RoutingBackendStatus(available=True, version="test")
+
+    def refill_zones(self, pcb: Path) -> None:
+        assert pcb.is_file()
+
+    def route(
+        self, pcb: Path, workspace: Path, request: RoutingRequest, strategy: str
+    ) -> RoutedBoardCandidate:
+        raise CopperbrainError(
+            ErrorCode.VALIDATION_FAILED,
+            "fixture routing failure",
+            details={
+                "watchdog": "stalled",
+                "freerouting_pass_metrics": [
+                    FreeRoutingPassMetric(
+                        pass_number=1,
+                        board_incomplete_count=1,
+                        queued_item_count=1,
+                    ).model_dump(mode="json")
+                ],
+                "freerouting_normalization_count": 2,
+            },
         )
 
 
@@ -241,6 +285,259 @@ def test_duplicate_candidates_are_reported(tmp_path: Path, monkeypatch: pytest.M
     assert plan.candidate_evaluations[0].duplicate_of is None
     assert plan.candidate_evaluations[1].duplicate_of == "prioritized"
     assert plan.candidate_evaluations[0].fingerprint == plan.candidate_evaluations[1].fingerprint
+
+
+def test_routing_proposal_emits_reusable_connectivity_metrics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, session = setup(tmp_path, monkeypatch)
+
+    plan = service.propose(session, RoutingRequest())
+
+    records = sorted((tmp_path / "data" / "metrics" / "connectivity").rglob("*.json"))
+    assert [path.name for path in records] == ["baseline.json", "candidate-prioritized.json"]
+    payloads = [json.loads(path.read_text(encoding="utf-8")) for path in records]
+    assert {payload["phase"] for payload in payloads} == {"baseline", "candidate"}
+    assert all(payload["schema_version"] == 4 for payload in payloads)
+    assert all(len(payload["project_fingerprint"]) == 64 for payload in payloads)
+    assert payloads[1]["outcome"] == "success"
+    assert payloads[1]["freerouting_pass_metrics"][0]["queued_item_count"] == 1
+    assert payloads[1]["requested_net_role_counts"] == {"ground": 1}
+    assert payloads[1]["board_width_mm"] == 40
+    assert payloads[1]["copper_layer_count"] == 2
+    assert payloads[1]["footprint_count"] == 2
+    assert payloads[1]["pad_count"] == 4
+    assert payloads[1]["open_connection_delta"] == 1
+    assert payloads[1]["copper_produced_per_second"] > 0
+    assert payloads[1]["connections_resolved_per_pass"] == 1
+    assert payloads[1]["best_pass_number"] == 1
+    assert plan.metrics_run_id == payloads[0]["run_id"] == payloads[1]["run_id"]
+
+    summary = service.metrics_for_run(plan.metrics_run_id)
+    assert summary.record_count == 2
+    assert summary.best_strategy == "prioritized"
+    assert summary.best_open_connection_delta == 1
+    assert summary.comparable_candidate_count == 1
+    assert summary.failed_candidate_count == 0
+    assert summary.recommended_max_passes == 2
+    assert summary.same_baseline_batches[0].run_id == plan.metrics_run_id
+
+
+def test_net_role_metrics_require_both_differential_members() -> None:
+    assert PcbRoutingService._requested_net_role_counts(("FAULT_N", "SPI_CS_N")) == {"signal": 2}
+    assert PcbRoutingService._requested_net_role_counts(("USB_D_P", "USB_D_N")) == {
+        "differential_candidate": 2
+    }
+    assert PcbRoutingService._requested_net_role_counts(
+        ("MYSTERY",), {"MYSTERY": "high_current"}
+    ) == {"high_current": 1}
+
+
+def test_local_routing_hotspots_trigger_placement_rework_evidence() -> None:
+    pads = tuple(
+        PcbPadInspection(
+            reference=reference,
+            number="1",
+            net="N",
+            x_mm=x,
+            y_mm=y,
+            width_mm=1,
+            height_mm=1,
+            layers=("F.Cu",),
+        )
+        for reference, x, y in (("U1", 10, 10), ("R1", 12, 10), ("R2", 13, 11))
+    )
+    analysis = RoutingAnalysis(
+        session_id="fixture",
+        complete=False,
+        net_count=1,
+        routed_net_count=0,
+        unrouted_net_count=1,
+        unrouted_connection_count=2,
+        unrouted_connections=(
+            UnroutedConnection(
+                net="N",
+                start_reference="U1",
+                start_pad="1",
+                end_reference="R1",
+                end_pad="1",
+                distance_mm=2,
+            ),
+            UnroutedConnection(
+                net="N",
+                start_reference="U1",
+                start_pad="1",
+                end_reference="R2",
+                end_pad="1",
+                distance_mm=3.162,
+            ),
+        ),
+    )
+
+    hotspots = PcbRoutingService._routing_hotspots(pads, analysis)
+
+    assert hotspots[0].connection_count == 2
+    assert hotspots[0].references == ("R1", "R2", "U1")
+
+
+def test_routing_lifecycle_metrics_are_correlated_to_proposal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, session = setup(tmp_path, monkeypatch)
+    plan = service.propose(session, RoutingRequest())
+    change = service.prepare(session, plan)
+    service.validate(change.id)
+    service.apply(change.id, confirmed=True, editor_closed=True)
+    service.rollback(change.id, confirmed=True, editor_closed=True)
+
+    summary = service.metrics_for_run(plan.metrics_run_id)
+    assert {item.phase for item in summary.records} == {
+        "baseline",
+        "candidate",
+        "prepare",
+        "validate",
+        "apply",
+        "rollback",
+    }
+    lifecycle = [item for item in summary.records if item.operation == "routing_change"]
+    assert all(item.parent_run_id == plan.metrics_run_id for item in lifecycle)
+
+
+def test_metrics_reader_accepts_persisted_schema_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, session = setup(tmp_path, monkeypatch)
+    plan = service.propose(session, RoutingRequest())
+    baseline = next((tmp_path / "data" / "metrics" / "connectivity").rglob("baseline.json"))
+    payload = json.loads(baseline.read_text(encoding="utf-8"))
+    payload["schema_version"] = 2
+    baseline.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert service.metrics_for_run(plan.metrics_run_id).records[0].schema_version == 2
+
+
+def test_failed_candidate_flushes_structured_metrics_before_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, session = setup(tmp_path, monkeypatch)
+    service.routing_backend = FailingRoutingBackend()
+
+    with pytest.raises(CopperbrainError, match="no usable routing candidate") as caught:
+        service.propose(session, RoutingRequest())
+
+    diagnostics = caught.value.error.details["partial_candidate_diagnostics"]
+    assert diagnostics[0]["diagnostic_only"] is True
+    assert diagnostics[0]["applicable"] is False
+
+    candidate = next(
+        (tmp_path / "data" / "metrics" / "connectivity").rglob("candidate-prioritized.json")
+    )
+    payload = json.loads(candidate.read_text(encoding="utf-8"))
+    assert payload["outcome"] == "failure"
+    assert payload["error_code"] == "validation_failed"
+    assert payload["watchdog_reason"] == "stalled"
+    assert payload["freerouting_pass_metrics"][0]["board_incomplete_count"] == 1
+    assert payload["freerouting_normalization_count"] == 2
+    summary = service.metrics_for_run(candidate.parent.name)
+    assert summary.failed_candidate_count == 1
+    assert summary.best_observed_pass_number == 1
+    assert summary.watchdog_reasons == ("stalled",)
+
+
+def test_routing_delta_rejects_new_copper_outside_requested_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, pcb, _ = setup(tmp_path, monkeypatch)
+    source = tmp_path / "source.kicad_pcb"
+    routed = tmp_path / "routed.kicad_pcb"
+    content = pcb.read_text(encoding="utf-8").replace(
+        '  (net 1 "GND")', '  (net 1 "GND")\n  (net 2 "OTHER")'
+    )
+    source.write_text(content, encoding="utf-8")
+    routed.write_text(content, encoding="utf-8")
+    service.adapter.apply_routing(
+        routed,
+        (
+            RouteSegment(
+                net="OTHER",
+                start_x_mm=5,
+                start_y_mm=5,
+                end_x_mm=6,
+                end_y_mm=5,
+                width_mm=0.25,
+            ),
+        ),
+        (),
+    )
+
+    with pytest.raises(CopperbrainError, match="outside the requested routing scope"):
+        service._routing_delta(source, routed, ("GND",))
+
+
+def test_routing_delta_tolerates_specctra_coordinate_round_trip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, _ = setup(tmp_path, monkeypatch)
+    source = tmp_path / "source.kicad_pcb"
+    routed = tmp_path / "routed.kicad_pcb"
+    shutil.copy2(FIXTURE, source)
+    content = FIXTURE.read_text(encoding="utf-8")
+    content = content.replace("(start 9.2 10)", "(start 9.2004 10)")
+    content = content.replace("(at 14 10)", "(at 14.0004 10)")
+    routed.write_text(content, encoding="utf-8")
+    service.adapter.apply_routing(
+        routed,
+        (
+            RouteSegment(
+                net="GND",
+                start_x_mm=9.2,
+                start_y_mm=10,
+                end_x_mm=14,
+                end_y_mm=12,
+                width_mm=0.25,
+            ),
+        ),
+        (),
+    )
+
+    segments, vias = service._routing_delta(source, routed, ("GND",))
+
+    assert len(segments) == 1
+    assert not vias
+
+
+def test_routing_delta_tolerates_specctra_segment_subdivision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, _ = setup(tmp_path, monkeypatch)
+    source = tmp_path / "source.kicad_pcb"
+    routed = tmp_path / "routed.kicad_pcb"
+    shutil.copy2(FIXTURE, source)
+    content = FIXTURE.read_text(encoding="utf-8").replace(
+        '  (segment (start 9.2 10) (end 19.2 10) (width 0.25) (layer "F.Cu") (net 1))\n',
+        '  (segment (start 9.2 10) (end 14.2 10) (width 0.25) (layer "F.Cu") (net 1))\n'
+        '  (segment (start 14.2 10) (end 19.2 10) (width 0.25) (layer "F.Cu") (net 1))\n',
+    )
+    routed.write_text(content, encoding="utf-8")
+    service.adapter.apply_routing(
+        routed,
+        (
+            RouteSegment(
+                net="GND",
+                start_x_mm=5,
+                start_y_mm=5,
+                end_x_mm=6,
+                end_y_mm=5,
+                width_mm=0.25,
+            ),
+        ),
+        (),
+    )
+
+    segments, vias = service._routing_delta(source, routed, ("GND",))
+
+    assert len(segments) == 1
+    assert not vias
 
 
 def test_unavailable_backend_is_actionable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,10 +1,18 @@
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import kicad_sch_api
 import pytest
+from sexpdata import Symbol
 
-from copperbrain.adapters.schematic_api import SchematicApiAdapter, _number, _string
+from copperbrain.adapters import schematic_api
+from copperbrain.adapters.schematic_api import (
+    SchematicApiAdapter,
+    _number,
+    _remove_private_library_properties,
+    _string,
+)
 from copperbrain.errors import CopperbrainError
 from copperbrain.models import ChangeOperation
 
@@ -25,6 +33,31 @@ def test_validate_rejects_non_schematic(tmp_path: Path) -> None:
     path.write_text("bad", encoding="utf-8")
     report = SchematicApiAdapter().validate(path)
     assert not report.valid
+
+
+def test_private_library_property_workaround_preserves_public_properties(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    symbol = SimpleNamespace(
+        raw_kicad_data=[
+            Symbol("symbol"),
+            "DRV8311S",
+            [Symbol("property"), Symbol("private"), "KLC_NOTE", "documentation"],
+            [Symbol("property"), "Reference", "U"],
+        ],
+        property_positions={"private": (0, 0, 0), "Reference": (1, 1, 0)},
+    )
+    cache = SimpleNamespace(get_symbol=lambda lib_id: symbol)
+    monkeypatch.setattr(schematic_api, "get_symbol_cache", lambda: cache)
+
+    _remove_private_library_properties("Driver_Motor:DRV8311S")
+
+    assert symbol.raw_kicad_data == [
+        Symbol("symbol"),
+        "DRV8311S",
+        [Symbol("property"), "Reference", "U"],
+    ]
+    assert symbol.property_positions == {"Reference": (1, 1, 0)}
 
 
 def test_update_property_replaces_existing_standard_footprint(tmp_path: Path) -> None:

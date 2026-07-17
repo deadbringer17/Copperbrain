@@ -49,6 +49,12 @@ Java major version, and KiCad bundled Python bridge before proposing a route. Th
 local and fixed-command only; Copperbrain neither downloads runtimes silently nor exposes shell
 arguments through MCP.
 
+Scoped routing additionally requires `<jar-name>.capabilities.json` beside the JAR. The record must
+contain the exact lowercase SHA-256 in `jar_sha256` and `scoped_net_classes_cli=true`; a missing,
+invalid, or stale record causes a fail-safe refusal before Java starts. Automatic discovery prefers
+a hash-verified scoped-capable JAR. `get_routing_backend_status` exposes the selected capability
+path and verification result.
+
 ## Mutation safety
 
 The client must call `prepare_schematic_change`, review its semantic diff, risks and validation,
@@ -71,6 +77,8 @@ Controlled routing uses `get_routing_backend_status`, `analyze_unrouted_nets`, `
 `prepare_routing_change`, `validate_routing_change`, `apply_routing_change`, and
 `rollback_routing_change`. FreeRouting works only in private DSN/SES workspaces; Copperbrain
 imports its result, refuses changed existing copper, and exposes typed segment/via deltas only.
+KiCad refills zones on both the imported candidate and prepared typed copy before comparative DRC;
+Specctra-only coordinate rounding is matched within 1 um without replacing source-precision copper.
 Prepare works on a private project copy and requires both complete selected-net connectivity and
 comparative KiCad DRC before apply.
 Apply and rollback retain the same explicit confirmation, closed-editor, stale-hash, snapshot,

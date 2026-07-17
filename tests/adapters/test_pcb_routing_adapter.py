@@ -3,7 +3,10 @@
 import shutil
 from pathlib import Path
 
+import pytest
+
 from copperbrain.adapters.pcb_design import PcbFileAdapter
+from copperbrain.errors import CopperbrainError
 from copperbrain.models import RouteSegment
 
 FIXTURE = Path("tests/fixtures/kicad10_placement/placement.kicad_pcb")
@@ -93,3 +96,37 @@ def test_routing_items_accepts_kicad_10_name_valued_net_fields(tmp_path: Path) -
     segments, vias = PcbFileAdapter().routing_items(pcb)
     assert segments[0].net == "GND"
     assert vias[0].net == "GND"
+
+
+def test_inner_copper_segments_are_typed_and_disabled_layers_are_rejected(tmp_path: Path) -> None:
+    pcb = tmp_path / "four-layer.kicad_pcb"
+    content = FIXTURE.read_text(encoding="utf-8")
+    content = content.replace(
+        '    (0 "F.Cu" signal)\n    (31 "B.Cu" signal)',
+        '    (0 "F.Cu" signal)\n'
+        '    (2 "In1.Cu" power)\n'
+        '    (4 "In2.Cu" signal)\n'
+        '    (31 "B.Cu" signal)',
+    )
+    content = content.replace('(layer "F.Cu") (net 1))', '(layer "In2.Cu") (net 1))')
+    pcb.write_text(content, encoding="utf-8")
+
+    segments, _ = PcbFileAdapter().routing_items(pcb)
+    assert segments[0].layer == "In2.Cu"
+
+    with pytest.raises(CopperbrainError, match="not enabled"):
+        PcbFileAdapter().apply_routing(
+            pcb,
+            (
+                RouteSegment(
+                    net="GND",
+                    start_x_mm=5,
+                    start_y_mm=5,
+                    end_x_mm=6,
+                    end_y_mm=5,
+                    width_mm=0.2,
+                    layer="In3.Cu",
+                ),
+            ),
+            (),
+        )

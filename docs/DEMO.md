@@ -49,10 +49,11 @@ The extension configures routing constraints only. It neither routes nor rewrite
 
 To demonstrate controlled PCB routing after rules and placement are ready:
 
-1. call `get_routing_backend_status` and verify Java 25+, FreeRouting, and KiCad Python;
+1. call `get_routing_backend_status` and verify Java 25+, FreeRouting, KiCad Python, and
+   `scoped_routing_supported=true` for a subset run;
 2. call `analyze_unrouted_nets` and review the disconnected pad groups;
 3. call `propose_pcb_routing` with exact nets or an empty list for every routable net, then compare
-   completion, DRC regression, open-connection, via, and length metrics for the candidates; a
+   completion, DRC regression, open-connection, via, length, and per-pass work-queue metrics for the candidates; a
    non-empty list is enforced in the exported DSN so unrelated nets are not routed silently;
 4. pass the selected typed plan to `prepare_routing_change` and review the PDF, semantic diff,
    connectivity result, assumptions, and comparative DRC;

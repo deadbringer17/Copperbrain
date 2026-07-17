@@ -33,10 +33,17 @@ from copperbrain.models import (
     PlacementProposal,
     PlacementRequest,
     ProjectSession,
+    RouteSegment,
+    RouteVia,
     ValidationReport,
 )
 from copperbrain.services.outputs import PROJECT_COPY_IGNORE, publish_preview
-from copperbrain.services.placement_optimizer import optimize_placement, project_placement
+from copperbrain.services.placement_optimizer import (
+    copper_anchored_references,
+    copper_conflicting_references,
+    optimize_placement,
+    project_placement,
+)
 from copperbrain.services.projects import ProjectService, aggregate_hash, hash_file
 
 
@@ -92,6 +99,7 @@ class PcbDesignService:
         placement_adapter: KiCadPlacementAdapter | None = None,
         drc_runner: Callable[[Path | None], DrcReport] | None = None,
         pdf_exporter: Callable[[Path, Path], Path] | None = None,
+        zone_refiller: Callable[[Path], None] | None = None,
     ) -> None:
         self.projects = projects
         self.data_dir = data_dir
@@ -101,6 +109,7 @@ class PcbDesignService:
         self.pdf_exporter = pdf_exporter or (
             lambda pcb, destination: export_pcb_pdf(detect_kicad().selected_cli, pcb, destination)
         )
+        self.zone_refiller = zone_refiller
         self._changes: dict[str, _PreparedPlacement] = {}
 
     def _session_pcb(self, session_id: str) -> tuple[ProjectSession, Path]:
@@ -269,9 +278,37 @@ class PcbDesignService:
         pads = self.adapter.pads(pcb)
         by_reference = {item.reference: item for item in summary.footprints}
         missing = sorted(set(request.references) - set(by_reference))
+        anchored: tuple[str, ...] = ()
+        effective_request = request
+        segments: tuple[RouteSegment, ...] = ()
+        vias: tuple[RouteVia, ...] = ()
+        if request.existing_copper_policy == "preserve_anchors":
+            segments, vias = self.adapter.routing_items(pcb)
+            ignored_anchor_nets = (
+                frozenset({"GND", "/GND", "PGND", "/PGND"})
+                if not request.anchor_ground_copper
+                else frozenset()
+            )
+            anchored = tuple(
+                reference
+                for reference in copper_anchored_references(
+                    pads, segments, vias, ignored_nets=ignored_anchor_nets
+                )
+                if reference in request.references
+            )
+            movable = tuple(
+                reference for reference in request.references if reference not in anchored
+            )
+            if not movable:
+                raise CopperbrainError(
+                    ErrorCode.CONFLICT,
+                    "All requested footprints are anchored by existing copper",
+                    details={"anchored_references": list(anchored)},
+                )
+            effective_request = request.model_copy(update={"references": movable})
         locked = sorted(
             reference
-            for reference in request.references
+            for reference in effective_request.references
             if reference in by_reference and by_reference[reference].locked
         )
         if missing:
@@ -286,8 +323,27 @@ class PcbDesignService:
                 "Locked footprints cannot be placed automatically",
                 details={"references": locked},
             )
-        operations = optimize_placement(summary, pads, request)
-        predicted, predicted_pads = project_placement(summary, pads, operations)
+        while True:
+            operations = optimize_placement(summary, pads, effective_request)
+            predicted, predicted_pads = project_placement(summary, pads, operations)
+            if request.existing_copper_policy != "preserve_anchors":
+                break
+            conflicts = set(copper_conflicting_references(predicted_pads, segments, vias)) & set(
+                effective_request.references
+            )
+            if not conflicts:
+                break
+            anchored = tuple(sorted(set(anchored) | conflicts))
+            movable = tuple(
+                reference for reference in request.references if reference not in anchored
+            )
+            if not movable:
+                raise CopperbrainError(
+                    ErrorCode.CONFLICT,
+                    "Existing copper blocks every requested placement",
+                    details={"anchored_references": list(anchored)},
+                )
+            effective_request = request.model_copy(update={"references": movable})
         after_summary = summary.model_copy(update={"footprints": predicted})
         return PlacementProposal(
             session_id=session_id,
@@ -300,6 +356,19 @@ class PcbDesignService:
                 "Shared-net distance, placement envelope, edge affinity, rotation, and side "
                 "were scored deterministically",
                 "Only small SMD passives are eligible for automatic bottom-side placement",
+                *(
+                    (
+                        "Routing-coherent placement increased power/critical-net locality and "
+                        "penalized long or footprint-obstructed connection corridors",
+                    )
+                    if request.strategy == "routing_coherent"
+                    else ()
+                ),
+                *(
+                    (f"Preserved {len(anchored)} footprint(s) attached to existing copper",)
+                    if anchored
+                    else ()
+                ),
             ),
             assumptions=(
                 "Net distance is a pre-routing estimate, not SI/PI/EMC or thermal validation",
@@ -372,17 +441,24 @@ class PcbDesignService:
         workspace.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(session.root, workspace, ignore=PROJECT_COPY_IGNORE)
         temporary_pcb = workspace / pcb.relative_to(session.root)
-        current_layers = {
-            item.reference: item.layer for item in self.adapter.summary(pcb, session_id).footprints
+        current_placements = {
+            item.reference: item for item in self.adapter.summary(pcb, session_id).footprints
         }
-        side_change = any(
-            item.layer is not None and item.layer != current_layers.get(item.reference)
+        api_transform = any(
+            (item.layer is not None and item.layer != current_placements[item.reference].layer)
+            or not math.isclose(
+                item.rotation_deg % 360,
+                current_placements[item.reference].rotation_deg % 360,
+                abs_tol=1e-9,
+            )
             for item in operations
         )
-        if side_change:
+        if api_transform:
             self.placement_adapter.apply(temporary_pcb, operations)
         else:
             self.adapter.apply_placement(temporary_pcb, operations)
+        if self.zone_refiller is not None:
+            self.zone_refiller(temporary_pcb)
         validation, drc = self._validate_workspace(session, temporary_pcb)
         pdf = self.pdf_exporter(temporary_pcb, workspace / "Copperbrain-PCB-preview.pdf")
         preview_directory = publish_preview(workspace, session.root, identifier)

@@ -34,8 +34,25 @@ def _import(pcb: Path, ses: Path, destination: Path) -> int:
     board = pcbnew.LoadBoard(str(pcb))
     if board is None or not pcbnew.ImportSpecctraSES(board, str(ses)):
         return _fail("KiCad failed to import Specctra SES")
+    board.BuildConnectivity()
+    if not pcbnew.ZONE_FILLER(board).Fill(board.Zones(), False):
+        return _fail("KiCad failed to refill zones after Specctra import")
     if not pcbnew.SaveBoard(str(destination), board) or not destination.is_file():
         return _fail("KiCad failed to save the routed PCB")
+    return 0
+
+
+def _refill(pcb: Path) -> int:
+    if pcb.suffix.lower() != ".kicad_pcb" or not pcb.is_file():
+        return _fail("PCB input for zone refill is missing or invalid")
+    board = pcbnew.LoadBoard(str(pcb))
+    if board is None:
+        return _fail("KiCad failed to load the PCB for zone refill")
+    board.BuildConnectivity()
+    if not pcbnew.ZONE_FILLER(board).Fill(board.Zones(), False):
+        return _fail("KiCad failed to refill PCB zones")
+    if not pcbnew.SaveBoard(str(pcb), board):
+        return _fail("KiCad failed to save the zone-refilled PCB")
     return 0
 
 
@@ -49,7 +66,11 @@ def main(argv: list[str] | None = None) -> int:
             Path(values[2]).resolve(),
             Path(values[3]).resolve(),
         )
-    return _fail("Usage: kicad_specctra_worker.py export PCB DSN | import PCB SES OUTPUT")
+    if len(values) == 2 and values[0] == "refill":
+        return _refill(Path(values[1]).resolve())
+    return _fail(
+        "Usage: kicad_specctra_worker.py export PCB DSN | import PCB SES OUTPUT | refill PCB"
+    )
 
 
 if __name__ == "__main__":

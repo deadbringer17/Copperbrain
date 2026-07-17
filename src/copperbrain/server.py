@@ -65,21 +65,20 @@ sourcing = SourcingService(
 )
 changes = ChangeService(projects, settings.data_dir)
 pcb_rules = PcbRuleService(projects, settings.data_dir)
-pcb_design = PcbDesignService(projects, settings.data_dir)
+routing_backend = FreeRoutingAdapter.discover(
+    settings.data_dir,
+    explicit_jar=settings.freerouting_jar,
+    explicit_java=settings.freerouting_java,
+    timeout_seconds=settings.freerouting_timeout_seconds,
+    stall_seconds=settings.freerouting_stall_seconds,
+    normalization_limit=settings.freerouting_normalization_limit,
+)
+pcb_design = PcbDesignService(
+    projects, settings.data_dir, zone_refiller=routing_backend.refill_zones
+)
 pcb_grounding = PcbGroundingService(projects, pcb_design, settings.data_dir)
 pcb_layout = PcbLayoutService(projects, settings.data_dir)
-pcb_routing = PcbRoutingService(
-    projects,
-    settings.data_dir,
-    routing_backend=FreeRoutingAdapter.discover(
-        settings.data_dir,
-        explicit_jar=settings.freerouting_jar,
-        explicit_java=settings.freerouting_java,
-        timeout_seconds=settings.freerouting_timeout_seconds,
-        stall_seconds=settings.freerouting_stall_seconds,
-        normalization_limit=settings.freerouting_normalization_limit,
-    ),
-)
+pcb_routing = PcbRoutingService(projects, settings.data_dir, routing_backend=routing_backend)
 pcb_finalization = PcbFinalizationService(projects, pcb_design, pcb_routing)
 downloads = DownloadAdapter(
     settings.allowed_download_hosts,
@@ -359,6 +358,12 @@ def export_pcb_preview(session_id: str) -> dict[str, object]:
 def get_routing_backend_status() -> dict[str, object]:
     """Report local Java, FreeRouting JAR, and KiCad Python bridge availability."""
     return pcb_routing.backend_status().model_dump(mode="json")
+
+
+@mcp.tool()
+def get_connectivity_metrics(run_id: str) -> dict[str, object]:
+    """Return a sanitized optimization summary for one private connectivity run."""
+    return pcb_routing.metrics_for_run(run_id).model_dump(mode="json")
 
 
 @mcp.tool()

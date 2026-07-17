@@ -633,6 +633,402 @@ def motor_driver_bench_rule_requirements() -> tuple[NetRuleRequirement, ...]:
     )
 
 
+_BLDC_READABLE_POSITIONS: dict[str, tuple[float, float]] = {
+    "J1": (35.56, 66.04),
+    "F1": (60.96, 60.96),
+    "D1": (76.2, 86.36),
+    "C1": (96.52, 86.36),
+    "C2": (116.84, 86.36),
+    "C3": (137.16, 86.36),
+    "U1": (203.2, 111.76),
+    "C4": (177.8, 60.96),
+    "C5": (198.12, 60.96),
+    "C6": (218.44, 60.96),
+    "C7": (238.76, 60.96),
+    "R1": (157.48, 127.0),
+    "R2": (261.62, 91.44),
+    "R3": (292.1, 91.44),
+    "R4": (322.58, 91.44),
+    "C8": (261.62, 119.38),
+    "C9": (292.1, 119.38),
+    "C10": (322.58, 119.38),
+    "R5": (177.8, 165.1),
+    "R6": (208.28, 165.1),
+    "C11": (238.76, 165.1),
+    "J2": (76.2, 210.82),
+    "J3": (355.6, 111.76),
+    "J4": (355.6, 210.82),
+    "D2": (137.16, 210.82),
+    "R7": (111.76, 210.82),
+    "#FLG01": (45.72, 30.48),
+    "#FLG02": (71.12, 30.48),
+}
+
+
+def bldc_driver_bench_operations(
+    driver: ComponentCandidate,
+) -> tuple[ChangeOperation, ...]:
+    """Build a bounded 9-12.6 V DRV8311S three-phase BLDC driver benchmark."""
+    if "DRV8311S" not in driver.mpn.upper():
+        raise ValueError("BLDC benchmark requires a DRV8311S-compatible motor driver")
+
+    components = (
+        (
+            "J1",
+            "Connector_Generic:Conn_01x02",
+            "9-12V6_IN",
+            30,
+            45,
+            "TerminalBlock:TerminalBlock_MaiXu_MX126-5.0-02P_1x02_P5.00mm",
+        ),
+        (
+            "F1",
+            "Device:Fuse",
+            "4A PTC - SELECT PER MOTOR",
+            50,
+            40,
+            "Fuse:Fuse_1812_4532Metric_Pad1.30x3.40mm_HandSolder",
+        ),
+        ("D1", "Device:D_TVS", "SMBJ14CA", 55, 55, "Diode_SMD:D_SMB"),
+        (
+            "C1",
+            "Device:C_Polarized",
+            "47uF 25V LOW ESR",
+            70,
+            55,
+            "Capacitor_THT:CP_Radial_D8.0mm_P3.50mm",
+        ),
+        ("C2", "Device:C", "10uF 25V X7R", 85, 55, "Capacitor_SMD:C_1206_3216Metric"),
+        ("C3", "Device:C", "100nF 50V X7R", 100, 55, "Capacitor_SMD:C_0603_1608Metric"),
+        (
+            "U1",
+            "Driver_Motor:DRV8311S",
+            "DRV8311SRRWR",
+            150,
+            75,
+            "Package_DFN_QFN:Texas_RRW0024A_WQFN-24-1EP_3x3mm_P0.4mm_EP1.9x1.9mm",
+        ),
+        ("C4", "Device:C", "4.7uF 10V X7R", 125, 40, "Capacitor_SMD:C_0805_2012Metric"),
+        ("C5", "Device:C", "100nF 16V X7R", 145, 40, "Capacitor_SMD:C_0603_1608Metric"),
+        ("C6", "Device:C", "10uF 25V X7R", 165, 40, "Capacitor_SMD:C_1206_3216Metric"),
+        ("C7", "Device:C", "100nF 50V X7R", 185, 40, "Capacitor_SMD:C_0603_1608Metric"),
+        ("R1", "Device:R", "5.1k", 105, 90, "Resistor_SMD:R_0603_1608Metric"),
+        ("R2", "Device:R", "330R", 190, 90, "Resistor_SMD:R_0603_1608Metric"),
+        ("R3", "Device:R", "330R", 210, 90, "Resistor_SMD:R_0603_1608Metric"),
+        ("R4", "Device:R", "330R", 230, 90, "Resistor_SMD:R_0603_1608Metric"),
+        ("C8", "Device:C", "22pF C0G", 190, 105, "Capacitor_SMD:C_0603_1608Metric"),
+        ("C9", "Device:C", "22pF C0G", 210, 105, "Capacitor_SMD:C_0603_1608Metric"),
+        ("C10", "Device:C", "22pF C0G", 230, 105, "Capacitor_SMD:C_0603_1608Metric"),
+        ("R5", "Device:R", "10k 1%", 125, 120, "Resistor_SMD:R_0603_1608Metric"),
+        ("R6", "Device:R", "10k 1%", 155, 120, "Resistor_SMD:R_0603_1608Metric"),
+        ("C11", "Device:C", "100nF", 185, 120, "Capacitor_SMD:C_0603_1608Metric"),
+        (
+            "J2",
+            "Connector_Generic:Conn_02x10_Odd_Even",
+            "CONTROL_6PWM_SPI_CSA_HALL",
+            110,
+            170,
+            "Connector_PinHeader_1.27mm:PinHeader_2x10_P1.27mm_Vertical",
+        ),
+        (
+            "J3",
+            "Connector_Generic:Conn_01x03",
+            "BLDC_U_V_W",
+            270,
+            75,
+            "TerminalBlock:TerminalBlock_MaiXu_MX126-5.0-03P_1x03_P5.00mm",
+        ),
+        (
+            "J4",
+            "Connector_Generic:Conn_01x05",
+            "HALL_3V3_A_B_C_GND",
+            270,
+            140,
+            "Connector_JST:JST_PH_B5B-PH-K_1x05_P2.00mm_Vertical",
+        ),
+        ("D2", "Device:LED", "AVDD_OK", 75, 150, "LED_SMD:LED_0603_1608Metric"),
+        ("R7", "Device:R", "1k", 55, 150, "Resistor_SMD:R_0603_1608Metric"),
+        ("#FLG01", "power:PWR_FLAG", "PWR_FLAG", 45, 25, ""),
+        ("#FLG02", "power:PWR_FLAG", "PWR_FLAG", 60, 25, ""),
+    )
+    operations = [
+        ChangeOperation(kind="set_paper_size", target="schematic", parameters={"paper": "A3"}),
+        *(
+            _component_operation(
+                component[0],
+                component[1],
+                component[2],
+                *_BLDC_READABLE_POSITIONS[component[0]],
+                component[5],
+            )
+            for component in components
+        ),
+    ]
+
+    nets: dict[str, tuple[tuple[str, str], ...]] = {
+        "VBAT_RAW": (("J1", "1"), ("F1", "1")),
+        "VM": (
+            ("F1", "2"),
+            ("D1", "1"),
+            ("C1", "1"),
+            ("C2", "1"),
+            ("C3", "1"),
+            ("C5", "2"),
+            ("C6", "1"),
+            ("C7", "1"),
+            ("U1", "8"),
+            ("#FLG01", "1"),
+        ),
+        "GND": (
+            ("J1", "2"),
+            ("D1", "2"),
+            ("C1", "2"),
+            ("C2", "2"),
+            ("C3", "2"),
+            ("C4", "2"),
+            ("C6", "2"),
+            ("C7", "2"),
+            ("C8", "2"),
+            ("C9", "2"),
+            ("C10", "2"),
+            ("C11", "2"),
+            ("R6", "2"),
+            ("D2", "1"),
+            ("U1", "9"),
+            ("U1", "16"),
+            ("U1", "25"),
+            ("J2", "2"),
+            ("J2", "20"),
+            ("J4", "5"),
+            ("#FLG02", "1"),
+        ),
+        "AVDD": (
+            ("U1", "7"),
+            ("U1", "17"),
+            ("C4", "1"),
+            ("R1", "1"),
+            ("R5", "1"),
+            ("R7", "1"),
+            ("J2", "1"),
+            ("J4", "1"),
+        ),
+        "CP": (("U1", "6"), ("C5", "1")),
+        "CSAREF": (("U1", "2"), ("R5", "2"), ("R6", "1"), ("C11", "1")),
+        "PHASE_A": (("U1", "10"), ("J3", "1")),
+        "PHASE_B": (("U1", "11"), ("J3", "2")),
+        "PHASE_C": (("U1", "12"), ("J3", "3")),
+        "PWM_AH": (("U1", "15"), ("J2", "3")),
+        "PWM_AL": (("U1", "18"), ("J2", "4")),
+        "PWM_BH": (("U1", "14"), ("J2", "5")),
+        "PWM_BL": (("U1", "19"), ("J2", "6")),
+        "PWM_CH": (("U1", "13"), ("J2", "7")),
+        "PWM_CL": (("U1", "20"), ("J2", "8")),
+        "SPI_SCLK": (("U1", "23"), ("J2", "9")),
+        "SPI_MOSI": (("U1", "22"), ("J2", "10")),
+        "SPI_MISO": (("U1", "21"), ("J2", "11")),
+        "SPI_CS_N": (("U1", "24"), ("J2", "12")),
+        "FAULT_N": (("U1", "1"), ("R1", "2"), ("J2", "13")),
+        "CSA_A_RAW": (("U1", "5"), ("R2", "1")),
+        "ISENSE_A": (("R2", "2"), ("C8", "1"), ("J2", "14")),
+        "CSA_B_RAW": (("U1", "4"), ("R3", "1")),
+        "ISENSE_B": (("R3", "2"), ("C9", "1"), ("J2", "15")),
+        "CSA_C_RAW": (("U1", "3"), ("R4", "1")),
+        "ISENSE_C": (("R4", "2"), ("C10", "1"), ("J2", "16")),
+        "HALL_A": (("J2", "17"), ("J4", "2")),
+        "HALL_B": (("J2", "18"), ("J4", "3")),
+        "HALL_C": (("J2", "19"), ("J4", "4")),
+        "AVDD_LED": (("R7", "2"), ("D2", "2")),
+    }
+    for net, pins in nets.items():
+        for reference, pin in pins:
+            operations.append(_net_label(net, reference, pin))
+            operations.append(
+                ChangeOperation(
+                    kind="relayout_pin_label",
+                    target=f"{net}:{reference}.{pin}",
+                    parameters={
+                        "text": net,
+                        "reference": reference,
+                        "pin": pin,
+                        "stub_length_mm": 10.16,
+                    },
+                )
+            )
+
+    metadata: dict[str, dict[str, str]] = {
+        "U1": {
+            "LCSC": driver.lcsc,
+            "MPN": driver.mpn,
+            "Manufacturer": driver.manufacturer,
+            "Datasheet": "https://www.ti.com/lit/ds/symlink/drv8311.pdf",
+            "DesignNote": (
+                "PROVISIONAL: 9-12.6 V BLDC driver, 2 A continuous thermal target and 5 A "
+                "device peak limit; external controller must configure SPI protections before PWM"
+            ),
+        },
+        "D1": {
+            "LCSC": "C151253",
+            "MPN": "SMBJ14CA",
+            "Manufacturer": "Littelfuse",
+            "DesignNote": "14 V standoff, 23.2 V clamp; validate surge energy for the installation",
+        },
+        "F1": {
+            "DesignNote": (
+                "Select hold/trip curve from motor RMS, startup and stall-current evidence"
+            ),
+        },
+        "J2": {
+            "DesignNote": (
+                "External controller: 6-PWM, SPI, nFAULT, three CSA outputs and Hall inputs"
+            ),
+        },
+    }
+    for reference, properties in metadata.items():
+        operations.extend(
+            ChangeOperation(
+                kind="update_property",
+                target=reference,
+                parameters={"name": name, "value": value, "hidden": True},
+            )
+            for name, value in properties.items()
+        )
+    return tuple(operations)
+
+
+def bldc_schematic_readability_operations(
+    driver: ComponentCandidate,
+) -> tuple[ChangeOperation, ...]:
+    """Relayout the existing BLDC benchmark without changing its electrical topology."""
+    base = bldc_driver_bench_operations(driver)
+    moves = tuple(
+        ChangeOperation(
+            kind="move_component",
+            target=reference,
+            parameters={"x": position[0], "y": position[1]},
+        )
+        for reference, position in _BLDC_READABLE_POSITIONS.items()
+    )
+    labels = tuple(
+        ChangeOperation(
+            kind="relayout_pin_label",
+            target=operation.target,
+            parameters={
+                "text": operation.parameters["text"],
+                "reference": operation.parameters["reference"],
+                "pin": operation.parameters["pin"],
+                "stub_length_mm": 10.16,
+            },
+        )
+        for operation in base
+        if operation.kind == "label" and "reference" in operation.parameters
+    )
+    return (*moves, *labels)
+
+
+def bldc_driver_bench_layout_plan() -> PcbLayoutPlan:
+    """Place the BLDC benchmark on an 85 x 50 mm four-layer board."""
+    positions: dict[str, tuple[float, float, float, Literal["F.Cu", "B.Cu"]]] = {
+        "C1": (43, 30, 0, "F.Cu"),
+        "C10": (77, 50, 90, "B.Cu"),
+        "C11": (62, 50, 0, "B.Cu"),
+        "C2": (54, 31, 0, "F.Cu"),
+        "C3": (55, 36, 90, "B.Cu"),
+        "C4": (61, 50, 0, "F.Cu"),
+        "C5": (68, 37, 90, "B.Cu"),
+        "C6": (58, 37, 0, "F.Cu"),
+        "C7": (62, 37, 90, "B.Cu"),
+        "C8": (77, 42, 90, "B.Cu"),
+        "C9": (77, 46, 90, "B.Cu"),
+        "D1": (42, 52, 90, "F.Cu"),
+        "D2": (46, 62, 0, "F.Cu"),
+        "F1": (39, 42, 90, "F.Cu"),
+        "J1": (28, 42, 90, "F.Cu"),
+        "J2": (59, 62, 90, "F.Cu"),
+        "J3": (99, 43, 90, "F.Cu"),
+        "J4": (86, 25, 0, "F.Cu"),
+        "R1": (57, 50, 0, "B.Cu"),
+        "R2": (72, 42, 90, "B.Cu"),
+        "R3": (72, 46, 90, "B.Cu"),
+        "R4": (72, 50, 90, "B.Cu"),
+        "R5": (64, 47, 0, "B.Cu"),
+        "R6": (64, 52, 0, "B.Cu"),
+        "R7": (42, 62, 0, "F.Cu"),
+        "U1": (65, 43, 0, "F.Cu"),
+    }
+    return PcbLayoutPlan(
+        outline=RectangularBoardOutline(min_x_mm=20, min_y_mm=20, width_mm=85, height_mm=50),
+        placements=tuple(
+            PlacementOperation(
+                reference=reference,
+                x_mm=x,
+                y_mm=y,
+                rotation_deg=rotation,
+                layer=layer,
+            )
+            for reference, (x, y, rotation, layer) in sorted(positions.items())
+        ),
+        mounting_holes=tuple(
+            MountingHoleSpec(reference=f"H{index}", x_mm=x, y_mm=y)
+            for index, (x, y) in enumerate(((24, 24), (101, 24), (24, 66), (101, 66)), start=1)
+        ),
+    )
+
+
+def bldc_driver_bench_manufacturing_profile() -> ManufacturingProfile:
+    """Return conservative four-layer fabrication assumptions for the compact benchmark."""
+    return ManufacturingProfile(
+        min_clearance_mm=0.15,
+        min_track_width_mm=0.15,
+        min_via_diameter_mm=0.6,
+        min_via_drill_mm=0.3,
+        copper_thickness_um=35,
+        allowed_temperature_rise_c=20,
+        current_layer="external",
+    )
+
+
+def bldc_driver_bench_rule_requirements() -> tuple[NetRuleRequirement, ...]:
+    """Return reviewed net roles without inferring unstated motor requirements."""
+    return (
+        NetRuleRequirement(
+            name="CB_BLDC_POWER",
+            nets=("/VBAT_RAW", "/VM", "/PHASE_A", "/PHASE_B", "/PHASE_C", "/GND"),
+            role="high_current",
+            current_a=3,
+            clearance_mm=0.2,
+        ),
+        NetRuleRequirement(
+            name="CB_BLDC_PWM",
+            nets=("/PWM_AH", "/PWM_AL", "/PWM_BH", "/PWM_BL", "/PWM_CH", "/PWM_CL"),
+            role="switching",
+            track_width_mm=0.25,
+            max_length_mm=35,
+        ),
+        NetRuleRequirement(
+            name="CB_BLDC_CSA",
+            nets=(
+                "/CSAREF",
+                "/CSA_A_RAW",
+                "/CSA_B_RAW",
+                "/CSA_C_RAW",
+                "/ISENSE_A",
+                "/ISENSE_B",
+                "/ISENSE_C",
+            ),
+            role="signal",
+            track_width_mm=0.2,
+            max_length_mm=30,
+        ),
+        NetRuleRequirement(
+            name="CB_BLDC_CONTROL",
+            nets=("/SPI_SCLK", "/SPI_MOSI", "/SPI_MISO", "/SPI_CS_N", "/FAULT_N"),
+            role="signal",
+            track_width_mm=0.2,
+            max_length_mm=60,
+        ),
+    )
+
+
 def five_volt_buck_operations(candidate: ComponentCandidate) -> tuple[ChangeOperation, ...]:
     """Build a reviewable LM2596-class reference section from validated semantic operations."""
     required = "LM2596"

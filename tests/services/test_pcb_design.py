@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from copperbrain.adapters.pcb_design import KiCadPcbIpcAdapter
+from copperbrain.adapters.pcb_design import KiCadPcbIpcAdapter, PcbFileAdapter
+from copperbrain.adapters.pcb_placement import KiCadPlacementAdapter
 from copperbrain.errors import CopperbrainError
 from copperbrain.models import (
     ChangeStatus,
@@ -26,6 +27,11 @@ def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[PcbDesignSer
         KiCadPcbIpcAdapter,
         "status",
         staticmethod(lambda: IntegrationStatus(name="KiCad PCB IPC", available=False)),
+    )
+    monkeypatch.setattr(
+        KiCadPlacementAdapter,
+        "apply",
+        lambda _self, pcb, operations: PcbFileAdapter().apply_placement(pcb, operations),
     )
     root = tmp_path / "project"
     root.mkdir()
@@ -64,6 +70,7 @@ def test_queries_analysis_and_deterministic_proposal(
         session,
         PlacementRequest(
             references=("R1", "C1"),
+            strategy="routing_coherent",
             region=PcbBounds(min_x_mm=1, min_y_mm=1, max_x_mm=12, max_y_mm=12),
             spacing_mm=1,
             grid_mm=0.5,
@@ -78,6 +85,7 @@ def test_queries_analysis_and_deterministic_proposal(
     assert proposal.analysis_after.placement_area_mm2 < proposal.analysis_before.placement_area_mm2
     assert {item.rotation_deg for item in proposal.operations} != {0}
     assert proposal.operations == service.propose(session, proposal.request).operations
+    assert any("Routing-coherent placement" in item for item in proposal.evidence)
 
 
 def test_empty_board_is_not_reported_as_perfect_placement(
@@ -99,8 +107,11 @@ def test_prepare_apply_and_byte_exact_rollback(
 ) -> None:
     service, pcb, session = setup(tmp_path, monkeypatch)
     original = pcb.read_bytes()
+    refilled: list[Path] = []
+    service.zone_refiller = refilled.append
     operation = PlacementOperation(reference="R1", x_mm=15, y_mm=15, rotation_deg=90)
     change = service.prepare(session, (operation,))
+    assert refilled and refilled[0].name == pcb.name
     assert change.status is ChangeStatus.VALIDATED
     assert pcb.read_bytes() == original
     assert change.preview_pdf is not None and change.preview_pdf.is_file()
@@ -116,6 +127,21 @@ def test_prepare_apply_and_byte_exact_rollback(
     rolled_back = service.rollback(change.id, confirmed=True, editor_closed=True)
     assert rolled_back.status is ChangeStatus.ROLLED_BACK
     assert pcb.read_bytes() == original
+
+
+def test_preserve_anchors_refuses_to_move_fully_routed_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, session = setup(tmp_path, monkeypatch)
+
+    with pytest.raises(CopperbrainError, match="anchored by existing copper"):
+        service.propose(
+            session,
+            PlacementRequest(
+                references=("R1", "C1"),
+                existing_copper_policy="preserve_anchors",
+            ),
+        )
 
 
 def test_stale_change_and_read_only_preview(

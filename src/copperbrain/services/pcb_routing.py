@@ -9,10 +9,13 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import uuid
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from copperbrain.adapters.freerouting import FreeRoutingAdapter, RoutingBackend
@@ -20,6 +23,7 @@ from copperbrain.adapters.kicad_cli import export_pcb_pdf, run_drc
 from copperbrain.adapters.kicad_detection import detect_kicad
 from copperbrain.adapters.pcb_design import PcbFileAdapter
 from copperbrain.adapters.pcb_rules import (
+    read_managed_roles,
     read_managed_widths,
     read_netclasses,
     stage_router_project,
@@ -27,8 +31,11 @@ from copperbrain.adapters.pcb_rules import (
 from copperbrain.errors import CopperbrainError
 from copperbrain.models import (
     ChangeStatus,
+    ConnectivityMetricRecord,
+    ConnectivityMetricRunSummary,
     DrcReport,
     ErrorCode,
+    FreeRoutingPassMetric,
     PcbPadInspection,
     PcbRoutingChangeSet,
     ProjectSession,
@@ -38,12 +45,16 @@ from copperbrain.models import (
     RoutingBackendStatus,
     RoutingCandidateEvaluation,
     RoutingChangeRecord,
+    RoutingHotspot,
     RoutingPlan,
     RoutingRequest,
     RoutingReviewSummary,
     RoutingSnapshotRestoreResult,
+    UnroutedConnection,
     ValidationReport,
+    utc_now,
 )
+from copperbrain.services.connectivity_metrics import ConnectivityMetricsStore
 from copperbrain.services.outputs import PROJECT_COPY_IGNORE, publish_preview
 from copperbrain.services.projects import ProjectService, aggregate_hash, hash_file
 
@@ -71,6 +82,64 @@ def _atomic_copy(source: Path, destination: Path) -> None:
             os.unlink(temporary)
 
 
+def _segment_is_covered(
+    segment: RouteSegment,
+    candidates: tuple[RouteSegment, ...] | list[RouteSegment],
+    tolerance_mm: float,
+) -> bool:
+    """Return whether collinear candidate copper covers the complete segment."""
+
+    start = (segment.start_x_mm, segment.start_y_mm)
+    end = (segment.end_x_mm, segment.end_y_mm)
+    length = math.dist(start, end)
+    if length <= tolerance_mm:
+        return any(
+            math.isclose(segment.width_mm, candidate.width_mm, abs_tol=tolerance_mm)
+            and math.dist(start, (candidate.start_x_mm, candidate.start_y_mm)) <= tolerance_mm
+            and math.dist(end, (candidate.end_x_mm, candidate.end_y_mm)) <= tolerance_mm
+            for candidate in candidates
+        )
+
+    direction_x = (end[0] - start[0]) / length
+    direction_y = (end[1] - start[1]) / length
+    intervals: list[tuple[float, float]] = []
+    for candidate in candidates:
+        if not math.isclose(segment.width_mm, candidate.width_mm, abs_tol=tolerance_mm):
+            continue
+        points = (
+            (candidate.start_x_mm, candidate.start_y_mm),
+            (candidate.end_x_mm, candidate.end_y_mm),
+        )
+        if any(
+            abs((point[0] - start[0]) * direction_y - (point[1] - start[1]) * direction_x)
+            > tolerance_mm
+            for point in points
+        ):
+            continue
+        projections = tuple(
+            (point[0] - start[0]) * direction_x + (point[1] - start[1]) * direction_y
+            for point in points
+        )
+        lower, upper = sorted(projections)
+        if upper < -tolerance_mm or lower > length + tolerance_mm:
+            continue
+        intervals.append((max(0.0, lower), min(length, upper)))
+
+    if not intervals:
+        return False
+    intervals.sort()
+    if intervals[0][0] > tolerance_mm:
+        return False
+    covered_until = intervals[0][1]
+    for lower, upper in intervals[1:]:
+        if lower > covered_until + tolerance_mm:
+            return False
+        covered_until = max(covered_until, upper)
+        if covered_until >= length - tolerance_mm:
+            return True
+    return covered_until >= length - tolerance_mm
+
+
 class PcbRoutingService:
     """Orchestrate external routing, deterministic evaluation, preview, and safe apply."""
 
@@ -91,6 +160,7 @@ class PcbRoutingService:
             lambda pcb, destination: export_pcb_pdf(detect_kicad().selected_cli, pcb, destination)
         )
         self.routing_backend = routing_backend or FreeRoutingAdapter.discover(data_dir)
+        self.metrics = ConnectivityMetricsStore(data_dir)
         self._changes: dict[str, _PreparedRouting] = {}
 
     @property
@@ -213,6 +283,115 @@ class PcbRoutingService:
     def backend_status(self) -> RoutingBackendStatus:
         return self.routing_backend.status()
 
+    def metrics_for_run(self, run_id: str) -> ConnectivityMetricRunSummary:
+        """Return a sanitized private-metrics summary for MCP optimization clients."""
+        return self.metrics.read_run(run_id)
+
+    def _write_lifecycle_metric(
+        self,
+        change: PcbRoutingChangeSet,
+        phase: str,
+        *,
+        started_at: datetime,
+        started_monotonic: float,
+        outcome: str = "success",
+        error_code: ErrorCode | None = None,
+    ) -> None:
+        """Correlate prepare/validate/apply/rollback evidence to the proposal run."""
+        _, pcb = self._session_pcb(change.session_id)
+        final = change.routing_analysis
+        baseline = change.plan.analysis_before
+        self.metrics.write(
+            ConnectivityMetricRecord(
+                run_id=uuid.uuid4().hex,
+                parent_run_id=change.plan.metrics_run_id,
+                operation="routing_change",
+                phase=phase,  # type: ignore[arg-type]
+                outcome=outcome,  # type: ignore[arg-type]
+                started_at=started_at,
+                finished_at=utc_now(),
+                duration_seconds=time.monotonic() - started_monotonic,
+                project_fingerprint=hash_file(pcb),
+                source_hashes=dict(sorted(change.source_hashes.items())),
+                backend="Copperbrain",
+                backend_version=change.plan.backend_version,
+                effective_configuration=self._routing_configuration(change.plan.request),
+                requested_net_count=len(change.plan.target_nets),
+                requested_net_role_counts=self._requested_net_role_counts(
+                    change.plan.target_nets, change.plan.request.net_roles
+                ),
+                baseline_routed_net_count=baseline.routed_net_count,
+                baseline_unrouted_net_count=baseline.unrouted_net_count,
+                final_routed_net_count=final.routed_net_count,
+                final_unrouted_net_count=final.unrouted_net_count,
+                baseline_open_connection_count=baseline.unrouted_connection_count,
+                final_open_connection_count=final.unrouted_connection_count,
+                open_connection_delta=(
+                    baseline.unrouted_connection_count - final.unrouted_connection_count
+                ),
+                segment_count=len(change.plan.segments),
+                via_count=len(change.plan.vias),
+                routed_length_mm=round(
+                    sum(
+                        math.dist(
+                            (item.start_x_mm, item.start_y_mm),
+                            (item.end_x_mm, item.end_y_mm),
+                        )
+                        for item in change.plan.segments
+                    ),
+                    6,
+                ),
+                final_drc_error_count=self._drc_error_count(change.drc),
+                final_drc_warning_count=self._drc_warning_count(change.drc),
+                error_code=error_code,
+            )
+        )
+
+    def _write_plan_lifecycle_failure(
+        self,
+        session_id: str,
+        plan: RoutingPlan,
+        phase: str,
+        *,
+        started_at: datetime,
+        started_monotonic: float,
+        error_code: ErrorCode,
+    ) -> None:
+        """Flush best-known lifecycle evidence when no change set could be produced."""
+        session, pcb = self._session_pcb(session_id)
+        baseline = plan.analysis_before
+        self.metrics.write(
+            ConnectivityMetricRecord(
+                run_id=uuid.uuid4().hex,
+                parent_run_id=plan.metrics_run_id,
+                operation="routing_change",
+                phase=phase,  # type: ignore[arg-type]
+                outcome="failure",
+                started_at=started_at,
+                finished_at=utc_now(),
+                duration_seconds=time.monotonic() - started_monotonic,
+                project_fingerprint=hash_file(pcb),
+                source_hashes=dict(sorted(session.hashes.items())),
+                backend="Copperbrain",
+                backend_version=plan.backend_version,
+                effective_configuration=self._routing_configuration(plan.request),
+                requested_net_count=len(plan.target_nets),
+                requested_net_role_counts=self._requested_net_role_counts(
+                    plan.target_nets, plan.request.net_roles
+                ),
+                baseline_routed_net_count=baseline.routed_net_count,
+                baseline_unrouted_net_count=baseline.unrouted_net_count,
+                final_routed_net_count=baseline.routed_net_count,
+                final_unrouted_net_count=baseline.unrouted_net_count,
+                baseline_open_connection_count=baseline.unrouted_connection_count,
+                final_open_connection_count=baseline.unrouted_connection_count,
+                open_connection_delta=0,
+                error_code=error_code,
+                diagnostic_only=True,
+                applicable=False,
+            )
+        )
+
     def analyze(self, session_id: str, net_names: tuple[str, ...] = ()) -> RoutingAnalysis:
         _, pcb = self._session_pcb(session_id)
         return self.adapter.analyze_routing(pcb, session_id, net_names)
@@ -225,8 +404,55 @@ class PcbRoutingService:
     ) -> tuple[tuple[RouteSegment, ...], tuple[RouteVia, ...]]:
         before_segments, before_vias = self.adapter.routing_items(source)
         after_segments, after_vias = self.adapter.routing_items(routed)
-        removed_segments = Counter(before_segments) - Counter(after_segments)
-        removed_vias = Counter(before_vias) - Counter(after_vias)
+        coordinate_tolerance_mm = 0.001
+        before_segment_buckets: dict[tuple[str, str], list[RouteSegment]] = {}
+        for item in before_segments:
+            before_segment_buckets.setdefault((item.net, item.layer), []).append(item)
+        after_segment_buckets: dict[tuple[str, str], list[RouteSegment]] = {}
+        for item in after_segments:
+            after_segment_buckets.setdefault((item.net, item.layer), []).append(item)
+        removed_segments = [
+            item
+            for item in before_segments
+            if not _segment_is_covered(
+                item,
+                after_segment_buckets.get((item.net, item.layer), ()),
+                coordinate_tolerance_mm,
+            )
+        ]
+
+        via_buckets: dict[tuple[str, tuple[str, ...]], list[RouteVia]] = {}
+        for via_item in after_vias:
+            via_buckets.setdefault((via_item.net, via_item.layers), []).append(via_item)
+        removed_vias: list[RouteVia] = []
+        for via_item in before_vias:
+            via_candidates = via_buckets.get((via_item.net, via_item.layers), [])
+            match = next(
+                (
+                    index
+                    for index, via_candidate in enumerate(via_candidates)
+                    if math.dist(
+                        (via_item.x_mm, via_item.y_mm),
+                        (via_candidate.x_mm, via_candidate.y_mm),
+                    )
+                    <= coordinate_tolerance_mm
+                    and math.isclose(
+                        via_item.diameter_mm,
+                        via_candidate.diameter_mm,
+                        abs_tol=coordinate_tolerance_mm,
+                    )
+                    and math.isclose(
+                        via_item.drill_mm,
+                        via_candidate.drill_mm,
+                        abs_tol=coordinate_tolerance_mm,
+                    )
+                ),
+                None,
+            )
+            if match is None:
+                removed_vias.append(via_item)
+            else:
+                via_candidates.pop(match)
         if removed_segments or removed_vias:
             raise CopperbrainError(
                 ErrorCode.VALIDATION_FAILED,
@@ -235,28 +461,42 @@ class PcbRoutingService:
                     "Route from a clean board or preserve existing tracks in FreeRouting."
                 ),
                 details={
-                    "removed_segments": sum(removed_segments.values()),
-                    "removed_vias": sum(removed_vias.values()),
+                    "removed_segments": len(removed_segments),
+                    "removed_vias": len(removed_vias),
+                    "round_trip_tolerance_mm": coordinate_tolerance_mm,
                 },
             )
         target = set(target_nets)
+        added_segments = tuple(
+            item
+            for item in after_segments
+            if not _segment_is_covered(
+                item,
+                before_segment_buckets.get((item.net, item.layer), ()),
+                coordinate_tolerance_mm,
+            )
+        )
+        added_vias = tuple(item for items in via_buckets.values() for item in items)
+        foreign_segments = tuple(item for item in added_segments if item.net not in target)
+        foreign_vias = tuple(item for item in added_vias if item.net not in target)
+        if foreign_segments or foreign_vias:
+            raise CopperbrainError(
+                ErrorCode.VALIDATION_FAILED,
+                "The autorouter added copper outside the requested routing scope",
+                details={
+                    "foreign_segment_count": len(foreign_segments),
+                    "foreign_via_count": len(foreign_vias),
+                },
+            )
         segments = tuple(
             sorted(
-                (
-                    item
-                    for item in (Counter(after_segments) - Counter(before_segments)).elements()
-                    if item.net in target
-                ),
+                (item for item in added_segments if item.net in target),
                 key=lambda item: item.model_dump_json(),
             )
         )
         vias = tuple(
             sorted(
-                (
-                    item
-                    for item in (Counter(after_vias) - Counter(before_vias)).elements()
-                    if item.net in target
-                ),
+                (item for item in added_vias if item.net in target),
                 key=lambda item: item.model_dump_json(),
             )
         )
@@ -358,7 +598,7 @@ class PcbRoutingService:
                         end_x_mm=escape[0],
                         end_y_mm=escape[1],
                         width_mm=pad_limit,
-                        layer=pad.layers[0],  # type: ignore[arg-type]
+                        layer=pad.layers[0],
                     )
                 )
         for index, (left_pad, left_width, _) in enumerate(fine_pads):
@@ -382,7 +622,7 @@ class PcbRoutingService:
                         end_x_mm=right_pad.x_mm,
                         end_y_mm=right_pad.y_mm,
                         width_mm=min(left_width, right_width),
-                        layer=left_pad.layers[0],  # type: ignore[arg-type]
+                        layer=left_pad.layers[0],
                     )
                 )
         groups: dict[
@@ -438,7 +678,7 @@ class PcbRoutingService:
                         end_x_mm=escape[0],
                         end_y_mm=escape[1],
                         width_mm=width,
-                        layer=layer,  # type: ignore[arg-type]
+                        layer=layer,
                     ),
                     RouteSegment(
                         net=net,
@@ -453,7 +693,7 @@ class PcbRoutingService:
                             ),
                             6,
                         ),
-                        layer=layer,  # type: ignore[arg-type]
+                        layer=layer,
                     ),
                 )
             )
@@ -480,8 +720,219 @@ class PcbRoutingService:
         )
         return sum((generated - baseline).values())
 
+    @staticmethod
+    def _drc_error_count(report: DrcReport) -> int | None:
+        if not report.available or report.error is not None:
+            return None
+        return sum(item.severity == "error" for item in report.violations)
+
+    @staticmethod
+    def _drc_warning_count(report: DrcReport) -> int | None:
+        if not report.available or report.error is not None:
+            return None
+        return sum(item.severity == "warning" for item in report.violations)
+
+    @staticmethod
+    def _new_drc_warnings(before: DrcReport, after: DrcReport) -> int | None:
+        if not before.available or not after.available or before.error or after.error:
+            return None
+        baseline = Counter(
+            (item.code, item.message) for item in before.violations if item.severity == "warning"
+        )
+        generated = Counter(
+            (item.code, item.message) for item in after.violations if item.severity == "warning"
+        )
+        return sum((generated - baseline).values())
+
+    @staticmethod
+    def _requested_net_role_counts(
+        net_names: tuple[str, ...], explicit_roles: Mapping[str, str] | None = None
+    ) -> dict[str, int]:
+        counts: Counter[str] = Counter()
+        explicit_roles = explicit_roles or {}
+        normalized_names = {name.upper().strip("/") for name in net_names}
+        for name in net_names:
+            normalized = name.upper().strip("/")
+            if name in explicit_roles:
+                role = explicit_roles[name]
+            elif re.search(r"(?:^|_)(?:GND|AGND|DGND|PGND)(?:$|_)", normalized):
+                role = "ground"
+            elif re.search(r"(?:^|_)(?:PHASE_[ABC]|MOTOR_[ABC]|OUT[ABC])(?:$|_)", normalized):
+                role = "motor_phase"
+            elif re.search(r"(?:^|_)(?:PWM|GATE|GH[123]|GL[123]|SW|LX)(?:$|_)", normalized):
+                role = "switching"
+            elif re.search(r"(?:^|_)(?:VBAT|VIN|VOUT|VCC|VDD|VM|POWER)(?:$|_)", normalized):
+                role = "power"
+            elif (
+                (normalized.endswith("_P") and f"{normalized[:-2]}_N" in normalized_names)
+                or (normalized.endswith("_N") and f"{normalized[:-2]}_P" in normalized_names)
+                or (normalized.endswith("+") and f"{normalized[:-1]}-" in normalized_names)
+                or (normalized.endswith("-") and f"{normalized[:-1]}+" in normalized_names)
+            ):
+                role = "differential_candidate"
+            else:
+                role = "signal"
+            counts[role] += 1
+        return dict(sorted(counts.items()))
+
+    @staticmethod
+    def _rule_derived_roles(session: ProjectSession, net_names: tuple[str, ...]) -> dict[str, str]:
+        """Resolve roles from typed managed rules, leaving names as an explicit fallback."""
+        _, assignments = read_netclasses(session.project_file)
+        rule_file = session.root / f"{session.project_file.stem}.kicad_dru"
+        class_roles = read_managed_roles(rule_file)
+        assignment_by_net = {item.net: item.netclass for item in assignments}
+        return {
+            net: class_roles[assignment_by_net[net]]
+            for net in net_names
+            if net in assignment_by_net and assignment_by_net[net] in class_roles
+        }
+
+    @staticmethod
+    def _routing_hotspots(
+        pads: tuple[PcbPadInspection, ...], analysis: RoutingAnalysis
+    ) -> tuple[RoutingHotspot, ...]:
+        """Cluster open airwires into deterministic 10 mm local placement regions."""
+        pad_by_key = {(item.reference, item.number): item for item in pads}
+        clusters: dict[tuple[int, int], list[tuple[UnroutedConnection, float, float]]] = {}
+        for connection in analysis.unrouted_connections:
+            start = pad_by_key.get((connection.start_reference, connection.start_pad))
+            end = pad_by_key.get((connection.end_reference, connection.end_pad))
+            if start is None or end is None:
+                continue
+            x = (start.x_mm + end.x_mm) / 2
+            y = (start.y_mm + end.y_mm) / 2
+            clusters.setdefault((math.floor(x / 10), math.floor(y / 10)), []).append(
+                (connection, x, y)
+            )
+        hotspots: list[RoutingHotspot] = []
+        for items in clusters.values():
+            if len(items) < 2:
+                continue
+            center_x = sum(item[1] for item in items) / len(items)
+            center_y = sum(item[2] for item in items) / len(items)
+            references = tuple(
+                sorted(
+                    {
+                        reference
+                        for connection, _, _ in items
+                        for reference in (
+                            connection.start_reference,
+                            connection.end_reference,
+                        )
+                    }
+                )[:12]
+            )
+            total_length = sum(connection.distance_mm for connection, _, _ in items)
+            radius = max(
+                1.0,
+                max(math.dist((center_x, center_y), (x, y)) for _, x, y in items),
+            )
+            hotspots.append(
+                RoutingHotspot(
+                    references=references,
+                    connection_count=len(items),
+                    total_airwire_length_mm=round(total_length, 6),
+                    center_x_mm=round(center_x, 6),
+                    center_y_mm=round(center_y, 6),
+                    radius_mm=round(radius, 6),
+                    recommendation=(
+                        "Prepare a reviewed local placement iteration for these footprints; "
+                        "reduce crossing airwires and reopen a routing corridor before retrying."
+                    ),
+                )
+            )
+        return tuple(
+            sorted(
+                hotspots,
+                key=lambda item: (-item.connection_count, -item.total_airwire_length_mm),
+            )[:5]
+        )
+
+    @staticmethod
+    def _pass_optimization_summary(
+        metrics: tuple[FreeRoutingPassMetric, ...],
+    ) -> tuple[int | None, int, int, float | None, float | None]:
+        best_pass: int | None = None
+        best_open: int | None = None
+        stagnation = 0
+        previous_open: int | None = None
+        for item in metrics:
+            current = (
+                item.board_unrouted_count
+                if item.board_unrouted_count is not None
+                else item.board_incomplete_count
+            )
+            if current is not None and (best_open is None or current < best_open):
+                best_open = current
+                best_pass = item.pass_number
+            if current is not None and previous_open is not None and current >= previous_open:
+                stagnation += 1
+            if current is not None:
+                previous_open = current
+        cpu_values = tuple(item.cpu_seconds for item in metrics if item.cpu_seconds is not None)
+        memory_values = tuple(
+            item.allocated_memory_gb for item in metrics if item.allocated_memory_gb is not None
+        )
+        return (
+            best_pass,
+            sum(item.failure_count for item in metrics),
+            stagnation,
+            max(cpu_values, default=None),
+            max(memory_values, default=None),
+        )
+
+    @staticmethod
+    def _freerouting_metrics_from_error(
+        exc: CopperbrainError,
+    ) -> tuple[FreeRoutingPassMetric, ...]:
+        raw = exc.error.details.get("freerouting_pass_metrics", ())
+        if not isinstance(raw, (list, tuple)):
+            return ()
+        metrics: list[FreeRoutingPassMetric] = []
+        for item in raw:
+            try:
+                metrics.append(FreeRoutingPassMetric.model_validate(item))
+            except (TypeError, ValueError):
+                continue
+        return tuple(metrics)
+
+    @staticmethod
+    def _freerouting_normalization_count_from_error(exc: CopperbrainError) -> int:
+        value = exc.error.details.get("freerouting_normalization_count", 0)
+        return value if isinstance(value, int) and value >= 0 else 0
+
+    def _routing_configuration(
+        self, request: RoutingRequest
+    ) -> dict[str, str | int | float | bool]:
+        configuration: dict[str, str | int | float | bool] = {
+            "preferred_layer": request.preferred_layer,
+            "track_width_mm": request.default_track_width_mm,
+            "clearance_mm": request.default_clearance_mm,
+            "via_diameter_mm": request.via_diameter_mm,
+            "via_drill_mm": request.via_drill_mm,
+            "grid_mm": request.grid_mm,
+            "allow_vias": request.allow_vias,
+            "max_passes": request.max_passes,
+            "semantic_stagnation_passes": request.semantic_stagnation_passes,
+            "thread_count": request.thread_count,
+            "existing_copper_policy": request.existing_copper_policy,
+        }
+        for attribute, name in (
+            ("timeout_seconds", "wall_time_budget_seconds"),
+            ("stall_seconds", "stall_time_budget_seconds"),
+            ("normalization_limit", "normalization_limit"),
+        ):
+            value = getattr(self.routing_backend, attribute, None)
+            if isinstance(value, int | float) and not isinstance(value, bool):
+                configuration[name] = value
+        return configuration
+
     def propose(self, session_id: str, request: RoutingRequest) -> RoutingPlan:
-        _, pcb = self._session_pcb(session_id)
+        proposal_started_at = utc_now()
+        proposal_started = time.monotonic()
+        run_id = uuid.uuid4().hex
+        session, pcb = self._session_pcb(session_id)
         analysis = self.adapter.analyze_routing(pcb, session_id, request.nets)
         if analysis.complete:
             raise CopperbrainError(
@@ -507,7 +958,7 @@ class PcbRoutingService:
         if not status.available:
             raise CopperbrainError(
                 ErrorCode.INTEGRATION_UNAVAILABLE,
-                "The local FreeRouting backend is unavailable",
+                f"The selected {status.name} backend is unavailable",
                 actionable_hint=(
                     "Install Java 25+ and a FreeRouting JAR, optionally set "
                     "COPPERBRAIN_FREEROUTING_JAVA and COPPERBRAIN_FREEROUTING_JAR, "
@@ -516,8 +967,70 @@ class PcbRoutingService:
                 details={"reason": status.reason or "unknown"},
             )
         target_nets = tuple(sorted({item.net for item in analysis.unrouted_connections}))
-        request = request.model_copy(update={"nets": target_nets})
+        explicit_roles = self._rule_derived_roles(session, target_nets)
+        explicit_roles.update(
+            {net: role for net, role in request.net_roles.items() if net in target_nets}
+        )
+        request = request.model_copy(update={"nets": target_nets, "net_roles": explicit_roles})
+        board_analysis = self.adapter.analyze_routing(pcb, session_id)
+        parsed = self.adapter.parse(pcb, session_id)
+        bounds = parsed.summary.board_bounds
+        board_width = bounds.max_x_mm - bounds.min_x_mm if bounds is not None else None
+        board_height = bounds.max_y_mm - bounds.min_y_mm if bounds is not None else None
+        board_area = board_width * board_height if board_width and board_height else None
+        placement_area = sum(
+            (item.bounds.max_x_mm - item.bounds.min_x_mm)
+            * (item.bounds.max_y_mm - item.bounds.min_y_mm)
+            for item in parsed.summary.footprints
+        )
+        placement_density = (
+            min(100.0, round(placement_area / board_area * 100, 6))
+            if board_area is not None
+            else None
+        )
+        source_hashes = dict(sorted(session.hashes.items()))
+        requested_net_role_counts = self._requested_net_role_counts(target_nets, explicit_roles)
         baseline_drc = self.drc_runner(pcb)
+        project_fingerprint = hash_file(pcb)
+        recommended_max_passes = self.metrics.recommended_max_passes(project_fingerprint)
+        routing_hotspots = self._routing_hotspots(parsed.pads, analysis)
+        baseline_finished_at = utc_now()
+        self.metrics.write(
+            ConnectivityMetricRecord(
+                run_id=run_id,
+                phase="baseline",
+                outcome="success",
+                started_at=proposal_started_at,
+                finished_at=baseline_finished_at,
+                duration_seconds=time.monotonic() - proposal_started,
+                project_fingerprint=project_fingerprint,
+                source_hashes=source_hashes,
+                board_width_mm=board_width,
+                board_height_mm=board_height,
+                copper_layer_count=len(parsed.copper_layers),
+                footprint_count=len(parsed.summary.footprints),
+                pad_count=len(parsed.pads),
+                placement_density_percent=placement_density,
+                backend=status.name,
+                backend_version=status.version,
+                effective_configuration=self._routing_configuration(request),
+                requested_net_count=len(target_nets),
+                requested_net_role_counts=requested_net_role_counts,
+                baseline_routed_net_count=analysis.routed_net_count,
+                baseline_unrouted_net_count=analysis.unrouted_net_count,
+                final_routed_net_count=analysis.routed_net_count,
+                final_unrouted_net_count=analysis.unrouted_net_count,
+                baseline_open_connection_count=analysis.unrouted_connection_count,
+                final_open_connection_count=analysis.unrouted_connection_count,
+                open_connection_delta=0,
+                board_baseline_open_connection_count=board_analysis.unrouted_connection_count,
+                board_final_open_connection_count=board_analysis.unrouted_connection_count,
+                baseline_drc_error_count=self._drc_error_count(baseline_drc),
+                final_drc_error_count=self._drc_error_count(baseline_drc),
+                baseline_drc_warning_count=self._drc_warning_count(baseline_drc),
+                final_drc_warning_count=self._drc_warning_count(baseline_drc),
+            )
+        )
         strategies = ("prioritized", "sequential")[: request.candidate_count]
         evaluated: list[
             tuple[
@@ -527,6 +1040,7 @@ class PcbRoutingService:
                 RoutingCandidateEvaluation,
             ]
         ] = []
+        diagnostic_candidates: list[RoutingCandidateEvaluation] = []
         failures: list[str] = []
         seen_fingerprints: dict[str, str] = {}
         proposal_root = self.data_dir / "routing-proposals"
@@ -535,6 +1049,9 @@ class PcbRoutingService:
             root = Path(directory)
             router_input = self._stage_router_input(pcb, root / "input", target_nets)
             for strategy_index, strategy in enumerate(strategies):
+                candidate_started_at = utc_now()
+                candidate_started = time.monotonic()
+                candidate = None
                 try:
                     candidate = self.routing_backend.route(
                         router_input,
@@ -552,9 +1069,11 @@ class PcbRoutingService:
                     routed_analysis = self.adapter.analyze_routing(
                         candidate.pcb, session_id, target_nets
                     )
+                    board_routed_analysis = self.adapter.analyze_routing(candidate.pcb, session_id)
                     self._stage_candidate_rules(pcb, candidate.pcb)
                     candidate_drc = self.drc_runner(candidate.pcb)
                     new_errors = self._new_drc_errors(baseline_drc, candidate_drc)
+                    new_warnings = self._new_drc_warnings(baseline_drc, candidate_drc)
                     track_length = round(
                         sum(
                             math.dist(
@@ -585,6 +1104,26 @@ class PcbRoutingService:
                         track_length_mm=track_length,
                         fingerprint=fingerprint,
                         duplicate_of=duplicate_of,  # type: ignore[arg-type]
+                        backend_elapsed_seconds=candidate.elapsed_seconds,
+                        freerouting_pass_metrics=candidate.pass_metrics,
+                        freerouting_normalization_count=candidate.normalization_count,
+                        applicable=candidate.watchdog_reason is None,
+                        diagnostic_only=candidate.watchdog_reason is not None,
+                        failure_reason=candidate.watchdog_reason,
+                        copper_produced_per_second=(
+                            round(track_length / candidate.elapsed_seconds, 6)
+                            if candidate.elapsed_seconds > 0
+                            else 0
+                        ),
+                        connections_resolved_per_pass=round(
+                            max(
+                                0,
+                                analysis.unrouted_connection_count
+                                - routed_analysis.unrouted_connection_count,
+                            )
+                            / max(1, len(candidate.pass_metrics)),
+                            6,
+                        ),
                     )
                     rank = (
                         0 if evaluation.complete else 1,
@@ -594,22 +1133,202 @@ class PcbRoutingService:
                         evaluation.track_length_mm,
                         strategy_index,
                     )
-                    evaluated.append((rank, segments, vias, evaluation))
+                    if evaluation.applicable:
+                        evaluated.append((rank, segments, vias, evaluation))
+                    else:
+                        diagnostic_candidates.append(evaluation)
+                    candidate_finished_at = utc_now()
+                    (
+                        best_pass,
+                        failed_route_count,
+                        stagnation_count,
+                        cpu_seconds,
+                        peak_memory_gb,
+                    ) = self._pass_optimization_summary(candidate.pass_metrics)
+                    self.metrics.write(
+                        ConnectivityMetricRecord(
+                            run_id=run_id,
+                            phase="candidate",
+                            outcome="success" if evaluation.applicable else "failure",
+                            started_at=candidate_started_at,
+                            finished_at=candidate_finished_at,
+                            duration_seconds=time.monotonic() - candidate_started,
+                            project_fingerprint=project_fingerprint,
+                            source_hashes=source_hashes,
+                            board_width_mm=board_width,
+                            board_height_mm=board_height,
+                            copper_layer_count=len(parsed.copper_layers),
+                            footprint_count=len(parsed.summary.footprints),
+                            pad_count=len(parsed.pads),
+                            placement_density_percent=placement_density,
+                            backend=status.name,
+                            backend_version=status.version,
+                            strategy=strategy,  # type: ignore[arg-type]
+                            effective_configuration=self._routing_configuration(request),
+                            requested_net_count=len(target_nets),
+                            requested_net_role_counts=requested_net_role_counts,
+                            baseline_routed_net_count=analysis.routed_net_count,
+                            baseline_unrouted_net_count=analysis.unrouted_net_count,
+                            final_routed_net_count=routed_analysis.routed_net_count,
+                            final_unrouted_net_count=routed_analysis.unrouted_net_count,
+                            baseline_open_connection_count=analysis.unrouted_connection_count,
+                            final_open_connection_count=routed_analysis.unrouted_connection_count,
+                            open_connection_delta=(
+                                analysis.unrouted_connection_count
+                                - routed_analysis.unrouted_connection_count
+                            ),
+                            board_baseline_open_connection_count=(
+                                board_analysis.unrouted_connection_count
+                            ),
+                            board_final_open_connection_count=(
+                                board_routed_analysis.unrouted_connection_count
+                            ),
+                            segment_count=len(segments),
+                            via_count=len(vias),
+                            routed_length_mm=track_length,
+                            baseline_drc_error_count=self._drc_error_count(baseline_drc),
+                            final_drc_error_count=self._drc_error_count(candidate_drc),
+                            new_drc_error_count=new_errors,
+                            baseline_drc_warning_count=self._drc_warning_count(baseline_drc),
+                            final_drc_warning_count=self._drc_warning_count(candidate_drc),
+                            new_drc_warning_count=new_warnings,
+                            freerouting_pass_metrics=candidate.pass_metrics,
+                            freerouting_normalization_count=candidate.normalization_count,
+                            best_pass_number=best_pass,
+                            failed_route_count=failed_route_count,
+                            stagnation_count=stagnation_count,
+                            cpu_seconds=cpu_seconds,
+                            peak_memory_gb=peak_memory_gb,
+                            watchdog_reason=candidate.watchdog_reason,
+                            copper_produced_per_second=evaluation.copper_produced_per_second,
+                            connections_resolved_per_pass=(
+                                evaluation.connections_resolved_per_pass
+                            ),
+                            diagnostic_only=evaluation.diagnostic_only,
+                            applicable=evaluation.applicable,
+                        )
+                    )
                 except CopperbrainError as exc:
                     failures.append(f"{strategy}: {exc}")
+                    pass_metrics = (
+                        candidate.pass_metrics
+                        if candidate is not None
+                        else self._freerouting_metrics_from_error(exc)
+                    )
+                    normalization_count = (
+                        candidate.normalization_count
+                        if candidate is not None
+                        else self._freerouting_normalization_count_from_error(exc)
+                    )
+                    candidate_finished_at = utc_now()
+                    (
+                        best_pass,
+                        failed_route_count,
+                        stagnation_count,
+                        cpu_seconds,
+                        peak_memory_gb,
+                    ) = self._pass_optimization_summary(pass_metrics)
+                    self.metrics.write(
+                        ConnectivityMetricRecord(
+                            run_id=run_id,
+                            phase="candidate",
+                            outcome="failure",
+                            started_at=candidate_started_at,
+                            finished_at=candidate_finished_at,
+                            duration_seconds=time.monotonic() - candidate_started,
+                            project_fingerprint=project_fingerprint,
+                            source_hashes=source_hashes,
+                            board_width_mm=board_width,
+                            board_height_mm=board_height,
+                            copper_layer_count=len(parsed.copper_layers),
+                            footprint_count=len(parsed.summary.footprints),
+                            pad_count=len(parsed.pads),
+                            placement_density_percent=placement_density,
+                            backend=status.name,
+                            backend_version=status.version,
+                            strategy=strategy,  # type: ignore[arg-type]
+                            effective_configuration=self._routing_configuration(request),
+                            requested_net_count=len(target_nets),
+                            requested_net_role_counts=requested_net_role_counts,
+                            baseline_routed_net_count=analysis.routed_net_count,
+                            baseline_unrouted_net_count=analysis.unrouted_net_count,
+                            baseline_open_connection_count=analysis.unrouted_connection_count,
+                            board_baseline_open_connection_count=(
+                                board_analysis.unrouted_connection_count
+                            ),
+                            baseline_drc_error_count=self._drc_error_count(baseline_drc),
+                            baseline_drc_warning_count=self._drc_warning_count(baseline_drc),
+                            error_code=exc.error.code,
+                            watchdog_reason=(
+                                str(exc.error.details["watchdog"])
+                                if "watchdog" in exc.error.details
+                                else None
+                            ),
+                            freerouting_pass_metrics=pass_metrics,
+                            freerouting_normalization_count=normalization_count,
+                            best_pass_number=best_pass,
+                            failed_route_count=failed_route_count,
+                            stagnation_count=stagnation_count,
+                            cpu_seconds=cpu_seconds,
+                            peak_memory_gb=peak_memory_gb,
+                            connections_resolved_per_pass=(
+                                round(
+                                    sum(item.connections_resolved for item in pass_metrics)
+                                    / max(1, len(pass_metrics)),
+                                    6,
+                                )
+                            ),
+                            diagnostic_only=True,
+                            applicable=False,
+                        )
+                    )
+                    diagnostic_candidates.append(
+                        RoutingCandidateEvaluation(
+                            strategy=strategy,  # type: ignore[arg-type]
+                            complete=False,
+                            unrouted_connection_count=analysis.unrouted_connection_count,
+                            drc_available=False,
+                            segment_count=0,
+                            via_count=0,
+                            track_length_mm=0,
+                            fingerprint=hashlib.sha256(
+                                f"{run_id}:{strategy}:diagnostic".encode()
+                            ).hexdigest(),
+                            backend_elapsed_seconds=time.monotonic() - candidate_started,
+                            freerouting_pass_metrics=pass_metrics,
+                            freerouting_normalization_count=normalization_count,
+                            applicable=False,
+                            diagnostic_only=True,
+                            failure_reason=str(exc),
+                            connections_resolved_per_pass=round(
+                                sum(item.connections_resolved for item in pass_metrics)
+                                / max(1, len(pass_metrics)),
+                                6,
+                            ),
+                        )
+                    )
         if not evaluated:
             raise CopperbrainError(
                 ErrorCode.VALIDATION_FAILED,
                 "FreeRouting produced no usable routing candidate",
                 actionable_hint="Review placement and design rules, then retry.",
-                details={"failures": failures},
+                details={
+                    "failures": failures,
+                    "partial_candidate_diagnostics": [
+                        item.model_dump(mode="json") for item in diagnostic_candidates
+                    ],
+                    "routing_hotspots": [item.model_dump(mode="json") for item in routing_hotspots],
+                    "placement_rework_recommended": bool(routing_hotspots),
+                    "recommended_max_passes": recommended_max_passes,
+                    "metrics_run_id": run_id,
+                },
             )
         evaluated.sort(key=lambda item: item[0])
         _, segments, vias, selected = evaluated[0]
         evaluations = tuple(
             item[3].model_copy(update={"selected": item[3].strategy == selected.strategy})
             for item in evaluated
-        )
+        ) + tuple(diagnostic_candidates)
         return RoutingPlan(
             session_id=session_id,
             request=request,
@@ -620,7 +1339,11 @@ class PcbRoutingService:
             predicted_complete=selected.complete,
             backend="freerouting",
             backend_version=status.version,
+            metrics_run_id=run_id,
             candidate_evaluations=evaluations,
+            routing_hotspots=routing_hotspots,
+            placement_rework_recommended=bool(routing_hotspots),
+            recommended_max_passes=recommended_max_passes,
             evidence=(
                 "Copper geometry was generated by a local FreeRouting process through "
                 "KiCad's official Specctra DSN/SES bridge",
@@ -690,6 +1413,25 @@ class PcbRoutingService:
         return validation, after, routing
 
     def prepare(self, session_id: str, plan: RoutingPlan) -> PcbRoutingChangeSet:
+        failure_started_at = utc_now()
+        failure_started = time.monotonic()
+        try:
+            return self._prepare(session_id, plan)
+        except CopperbrainError as exc:
+            with suppress(CopperbrainError):
+                self._write_plan_lifecycle_failure(
+                    session_id,
+                    plan,
+                    "prepare",
+                    started_at=failure_started_at,
+                    started_monotonic=failure_started,
+                    error_code=exc.error.code,
+                )
+            raise
+
+    def _prepare(self, session_id: str, plan: RoutingPlan) -> PcbRoutingChangeSet:
+        metric_started_at = utc_now()
+        metric_started = time.monotonic()
         if plan.session_id != session_id:
             raise CopperbrainError(
                 ErrorCode.INVALID_INPUT, "Routing plan belongs to another session"
@@ -708,6 +1450,7 @@ class PcbRoutingService:
         shutil.copytree(session.root, workspace, ignore=PROJECT_COPY_IGNORE)
         temporary_pcb = workspace / pcb.relative_to(session.root)
         self.adapter.apply_routing(temporary_pcb, plan.segments, plan.vias)
+        self.routing_backend.refill_zones(temporary_pcb)
         validation, drc, routing = self._validate_workspace(
             session, temporary_pcb, plan.target_nets, plan.request.require_complete
         )
@@ -749,6 +1492,12 @@ class PcbRoutingService:
         )
         self._changes[identifier] = _PreparedRouting(change_set, workspace)
         self._persist(self._changes[identifier], session.root)
+        self._write_lifecycle_metric(
+            change_set,
+            "prepare",
+            started_at=metric_started_at,
+            started_monotonic=metric_started,
+        )
         return change_set
 
     def _get(self, change_set_id: str) -> _PreparedRouting:
@@ -783,6 +1532,8 @@ class PcbRoutingService:
         )
 
     def validate(self, change_set_id: str) -> tuple[ValidationReport, DrcReport, RoutingAnalysis]:
+        metric_started_at = utc_now()
+        metric_started = time.monotonic()
         prepared = self._get(change_set_id)
         change = prepared.change_set
         session, pcb = self._session_pcb(change.session_id)
@@ -802,21 +1553,55 @@ class PcbRoutingService:
             }
         )
         self._persist(prepared, session.root)
+        self._write_lifecycle_metric(
+            prepared.change_set,
+            "validate",
+            started_at=metric_started_at,
+            started_monotonic=metric_started,
+            outcome="success" if validation.valid else "failure",
+            error_code=None if validation.valid else ErrorCode.VALIDATION_FAILED,
+        )
         return validation, drc, routing
 
     def apply(
         self, change_set_id: str, *, confirmed: bool, editor_closed: bool
     ) -> PcbRoutingChangeSet:
+        metric_started_at = utc_now()
+        metric_started = time.monotonic()
+        prepared = self._get(change_set_id)
+        change = prepared.change_set
         if not confirmed:
+            self._write_lifecycle_metric(
+                change,
+                "apply",
+                started_at=metric_started_at,
+                started_monotonic=metric_started,
+                outcome="failure",
+                error_code=ErrorCode.CONFIRMATION_REQUIRED,
+            )
             raise CopperbrainError(
                 ErrorCode.CONFIRMATION_REQUIRED, "Explicit confirmation is required"
             )
-        prepared = self._get(change_set_id)
-        change = prepared.change_set
         if change.status is not ChangeStatus.VALIDATED:
+            self._write_lifecycle_metric(
+                change,
+                "apply",
+                started_at=metric_started_at,
+                started_monotonic=metric_started,
+                outcome="failure",
+                error_code=ErrorCode.VALIDATION_FAILED,
+            )
             raise CopperbrainError(ErrorCode.VALIDATION_FAILED, "Routing is not validated")
         session, pcb = self._session_pcb(change.session_id)
         if not editor_closed or _editor_lock_exists(session.root):
+            self._write_lifecycle_metric(
+                change,
+                "apply",
+                started_at=metric_started_at,
+                started_monotonic=metric_started,
+                outcome="failure",
+                error_code=ErrorCode.UNSAFE_EDITOR_STATE,
+            )
             raise CopperbrainError(
                 ErrorCode.UNSAFE_EDITOR_STATE,
                 "KiCad editor state is not safely closed",
@@ -825,6 +1610,14 @@ class PcbRoutingService:
         if self._current_hashes(session) != change.source_hashes:
             prepared.change_set = change.model_copy(update={"status": ChangeStatus.STALE})
             self._persist(prepared, session.root)
+            self._write_lifecycle_metric(
+                prepared.change_set,
+                "apply",
+                started_at=metric_started_at,
+                started_monotonic=metric_started,
+                outcome="failure",
+                error_code=ErrorCode.CONFLICT,
+            )
             raise CopperbrainError(ErrorCode.CONFLICT, "Routing change set is stale")
         validation, drc, routing = self._validate_workspace(
             session,
@@ -842,6 +1635,14 @@ class PcbRoutingService:
                 }
             )
             self._persist(prepared, session.root)
+            self._write_lifecycle_metric(
+                prepared.change_set,
+                "apply",
+                started_at=metric_started_at,
+                started_monotonic=metric_started,
+                outcome="failure",
+                error_code=ErrorCode.VALIDATION_FAILED,
+            )
             raise CopperbrainError(
                 ErrorCode.VALIDATION_FAILED,
                 "Routing failed validation immediately before apply",
@@ -870,37 +1671,94 @@ class PcbRoutingService:
             for affected in change.affected_files:
                 relative = affected.relative_to(session.root)
                 _atomic_copy(snapshot / relative, affected)
+            self._write_lifecycle_metric(
+                change,
+                "apply",
+                started_at=metric_started_at,
+                started_monotonic=metric_started,
+                outcome="failure",
+                error_code=ErrorCode.INTERNAL_ERROR,
+            )
             raise
         prepared.snapshot = snapshot
         prepared.change_set = change.model_copy(
             update={"status": ChangeStatus.APPLIED, "snapshot_id": snapshot_id}
         )
         self._persist(prepared, session.root)
+        self._write_lifecycle_metric(
+            prepared.change_set,
+            "apply",
+            started_at=metric_started_at,
+            started_monotonic=metric_started,
+        )
         return prepared.change_set
 
     def rollback(
         self, change_set_id: str, *, confirmed: bool, editor_closed: bool
     ) -> PcbRoutingChangeSet:
+        metric_started_at = utc_now()
+        metric_started = time.monotonic()
+        prepared = self._get(change_set_id)
+        change = prepared.change_set
         if not confirmed:
+            self._write_lifecycle_metric(
+                change,
+                "rollback",
+                started_at=metric_started_at,
+                started_monotonic=metric_started,
+                outcome="failure",
+                error_code=ErrorCode.CONFIRMATION_REQUIRED,
+            )
             raise CopperbrainError(
                 ErrorCode.CONFIRMATION_REQUIRED, "Explicit confirmation is required"
             )
-        prepared = self._get(change_set_id)
-        change = prepared.change_set
         if change.status is not ChangeStatus.APPLIED or prepared.snapshot is None:
+            self._write_lifecycle_metric(
+                change,
+                "rollback",
+                started_at=metric_started_at,
+                started_monotonic=metric_started,
+                outcome="failure",
+                error_code=ErrorCode.CONFLICT,
+            )
             raise CopperbrainError(
                 ErrorCode.CONFLICT, "Only an applied routing change can be rolled back"
             )
         session, _ = self._session_pcb(change.session_id)
         if not editor_closed or _editor_lock_exists(session.root):
+            self._write_lifecycle_metric(
+                change,
+                "rollback",
+                started_at=metric_started_at,
+                started_monotonic=metric_started,
+                outcome="failure",
+                error_code=ErrorCode.UNSAFE_EDITOR_STATE,
+            )
             raise CopperbrainError(
                 ErrorCode.UNSAFE_EDITOR_STATE, "KiCad editor state is not safely closed"
             )
-        for affected in change.affected_files:
-            relative = affected.relative_to(session.root)
-            _atomic_copy(prepared.snapshot / relative, affected)
+        try:
+            for affected in change.affected_files:
+                relative = affected.relative_to(session.root)
+                _atomic_copy(prepared.snapshot / relative, affected)
+        except Exception:
+            self._write_lifecycle_metric(
+                change,
+                "rollback",
+                started_at=metric_started_at,
+                started_monotonic=metric_started,
+                outcome="failure",
+                error_code=ErrorCode.INTERNAL_ERROR,
+            )
+            raise
         prepared.change_set = change.model_copy(update={"status": ChangeStatus.ROLLED_BACK})
         self._persist(prepared, session.root)
+        self._write_lifecycle_metric(
+            prepared.change_set,
+            "rollback",
+            started_at=metric_started_at,
+            started_monotonic=metric_started,
+        )
         return prepared.change_set
 
     def restore_snapshot(

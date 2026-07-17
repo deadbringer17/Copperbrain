@@ -132,21 +132,34 @@ four M3 holes, a star-separated `PGND`/logic `GND`, and a 70 um external-copper 
 a review benchmark, not a production-qualified design; high-current zones, thermal/EMC/DFM,
 motor stall behavior, and the final stackup still require engineering validation.
 
+The `benchmark_bldc_drv8311` reference project exercises the same guarded workflow on an
+85 x 50 mm four-layer BLDC driver. It uses a DRV8311S integrated three-phase stage for a
+provisional 9--12.6 V, 2 A continuous operating point, exposes 6-PWM, SPI, three current-sense
+outputs, fault, and Hall signals, and includes input protection, decoupling, a reviewed In1.Cu GND
+plane, thermal-pad via-in-pad fanout, and project-local rule classes. The generated BOM and design
+report live below `benchmark_bldc_drv8311/copperbrain-output/`. It remains a benchmark, not a
+production release: power/phase copper, thermal/SOA, EMC, DFM, and the remaining signal routing are
+explicitly blocked by readiness evidence rather than being silently inferred.
+
 ## Controlled PCB routing via MCP
 
 After rules, placement, and `grounding_pcb` are reviewed and applied, use `analyze_unrouted_nets`
 to identify the remaining disconnected pad groups. Ground-zone connectivity is included, so the
 router does not redundantly route pads already joined by an applied plane. Check
-`get_routing_backend_status`, then call `propose_pcb_routing`: a local FreeRouting
-process consumes KiCad's official Specctra DSN, returns one or two isolated candidates, and
-Copperbrain deterministically ranks them by completion, new DRC errors, open connections, vias,
-and routed length. Only the selected candidate's copper delta becomes typed segments and vias.
+`get_routing_backend_status`, then call `propose_pcb_routing`. FreeRouting consumes KiCad's
+official Specctra DSN and returns one or two isolated candidates. Copperbrain ranks them by
+completion, new DRC errors, open connections, vias, and routed length. Only the selected
+candidate's copper delta becomes typed segments and vias; there is no internal routing fallback.
 When `nets` is empty, Copperbrain materializes the exact currently-unrouted net set before DSN
-export, so already-complete ground domains and unrelated nets cannot enter the router implicitly.
-There is no implicit fallback to the former internal A* router.
+export. FreeRouting retains non-target net and plane geometry but moves those nets into generated
+preserve classes during scope validation. The upstream FreeRouting 2.2.4 CLI parses `-inc` but does
+not propagate it to the loaded headless board; Copperbrain therefore refuses a scoped run before
+Java starts unless the selected JAR has a hash-bound capability record proving that headless class
+exclusion works. Every imported result is rejected if it removes existing copper or adds copper
+outside the requested net set.
 
 Pass the reviewed plan to `prepare_routing_change`. Copperbrain writes only a private copy,
-rechecks selected-net connectivity, runs comparative KiCad DRC, exports
+refills zones through KiCad after typed copper insertion, rechecks selected-net connectivity, runs comparative KiCad DRC, exports
 `Copperbrain-PCB-routing-preview.pdf`, and publishes the project preview below
 `copperbrain-output/previews/<change-set-id>/`. Only a complete, DRC-valid plan can be applied with
 `apply_routing_change`, explicit confirmation, and a closed editor. `rollback_routing_change`
@@ -156,6 +169,16 @@ restart. The KiCad Project Manager may remain open; only a PCB-document lock blo
 apply/rollback. Boards containing pre-existing copper are rejected by default; explicitly select the
 `preserve` policy only for intentional incremental routing. A wall-time/stall watchdog also stops
 known FreeRouting normalization loops and cleans up the Java process tree.
+Specctra coordinate round trips are matched with a 1 um tolerance when proving that existing copper
+was preserved; the typed delta is still applied to the original-precision project copy.
+Each proposal writes versioned baseline and per-candidate JSON metrics below the private
+`COPPERBRAIN_DATA_DIR/metrics/connectivity/` tree. FreeRouting progress records retain bounded
+per-pass board totals, actual queued items, failures, duration, score, CPU, allocated memory, and
+normalization evidence. The returned
+`RoutingPlan.metrics_run_id` correlates those records with preview, apply, and recovery.
+Call `get_connectivity_metrics` with that ID for a bounded, sanitized optimization view including
+the best observed pass, connection delta, failed-candidate count, stagnation, and watchdog causes.
+New records use schema 3 while the reader remains compatible with persisted schema-2 records.
 
 For the compact end-to-end surface, call `prepare_pcb_finalization`, review its summary, then use
 `validate_pcb_finalization` and `apply_pcb_finalization`. `assess_pcb_readiness` and

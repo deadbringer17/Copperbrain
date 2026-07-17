@@ -182,6 +182,8 @@ class ChangeOperation(FrozenModel):
         "label",
         "no_connect",
         "set_paper_size",
+        "move_component",
+        "relayout_pin_label",
     ]
     target: str
     parameters: dict[str, str | int | float | bool] = Field(default_factory=dict)
@@ -192,6 +194,25 @@ class ValidationReport(FrozenModel):
     checks: dict[str, bool] = Field(default_factory=dict)
     messages: tuple[str, ...] = ()
     erc: ErcReport | None = None
+
+
+class SchematicReadabilityReport(FrozenModel):
+    """Deterministic layout evidence extracted from a rendered schematic source."""
+
+    schematic_file: Path
+    component_count: Annotated[int, Field(ge=0)]
+    label_count: Annotated[int, Field(ge=0)]
+    wire_count: Annotated[int, Field(ge=0)]
+    labels_directly_on_pins: Annotated[int, Field(ge=0)]
+    labels_without_wire_connection: Annotated[int, Field(ge=0)] = 0
+    duplicate_label_positions: Annotated[int, Field(ge=0)]
+    label_overlap_count: Annotated[int, Field(ge=0)]
+    minimum_component_spacing_mm: Annotated[float | None, Field(ge=0)] = None
+    occupied_width_mm: Annotated[float, Field(ge=0)] = 0
+    occupied_height_mm: Annotated[float, Field(ge=0)] = 0
+    readability_score: Annotated[float, Field(ge=0, le=100)]
+    valid: bool
+    messages: tuple[str, ...] = ()
 
 
 class ChangeStatus(StrEnum):
@@ -243,10 +264,29 @@ class ChangeSet(FrozenModel):
     semantic_diff: tuple[str, ...]
     risks: tuple[str, ...]
     validation_report: ValidationReport
+    readability_report: SchematicReadabilityReport | None = None
     preview_directory: Path
     status: ChangeStatus = ChangeStatus.PREPARED
     snapshot_id: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
+
+
+class SchematicChangeRecord(FrozenModel):
+    """Private, versioned persistence envelope for a prepared schematic change."""
+
+    schema_version: Literal[1] = 1
+    project_root: Path
+    workspace: Path
+    affected_relative_files: Annotated[tuple[Path, ...], Field(min_length=1)]
+    change_set: ChangeSet
+    snapshot: Path | None = None
+
+    @field_validator("affected_relative_files")
+    @classmethod
+    def relative_files_only(cls, value: tuple[Path, ...]) -> tuple[Path, ...]:
+        if any(path.is_absolute() or ".." in path.parts for path in value):
+            raise ValueError("affected schematic files must be project-relative")
+        return value
 
 
 class ManufacturingProfile(FrozenModel):
@@ -375,6 +415,17 @@ class PcbRuleSet(FrozenModel):
     manufacturing: ManufacturingProfile
     classes: Annotated[tuple[NetClassRule, ...], Field(min_length=1)]
     assignments: Annotated[tuple[NetClassAssignment, ...], Field(min_length=1)]
+    class_roles: dict[
+        str,
+        Literal[
+            "signal",
+            "power",
+            "high_current",
+            "high_voltage",
+            "differential",
+            "switching",
+        ],
+    ] = Field(default_factory=dict)
     fanout_constraints: tuple[FanoutConstraint, ...] = ()
     courtyard_additions: tuple[CourtyardAddition, ...] = ()
     evidence: tuple[str, ...] = ()
@@ -392,6 +443,8 @@ class PcbRuleSet(FrozenModel):
         known_classes = set(class_names)
         if any(item.netclass not in known_classes for item in self.assignments):
             raise ValueError("assignments must reference a rule-set netclass")
+        if self.class_roles and set(self.class_roles) != known_classes:
+            raise ValueError("class_roles must explicitly classify every rule-set netclass")
         references = [item.reference for item in self.fanout_constraints]
         if len(references) != len(set(references)):
             raise ValueError("each footprint may have only one fanout constraint")
@@ -560,7 +613,14 @@ class RouteSegment(FrozenModel):
     end_x_mm: float
     end_y_mm: float
     width_mm: Annotated[float, Field(gt=0)]
-    layer: Literal["F.Cu", "B.Cu"] = "F.Cu"
+    layer: str = "F.Cu"
+
+    @field_validator("layer")
+    @classmethod
+    def copper_layer_only(cls, value: str) -> str:
+        if re.fullmatch(r"(?:F|B|In(?:[1-9]|[12][0-9]|30))\.Cu", value) is None:
+            raise ValueError("route segment layer must be a copper layer name")
+        return value
 
     @model_validator(mode="after")
     def nonzero_length(self) -> RouteSegment:
@@ -575,10 +635,7 @@ class RouteVia(FrozenModel):
     y_mm: float
     diameter_mm: Annotated[float, Field(gt=0)] = 0.6
     drill_mm: Annotated[float, Field(gt=0)] = 0.3
-    layers: tuple[Literal["F.Cu", "B.Cu"], Literal["F.Cu", "B.Cu"]] = (
-        "F.Cu",
-        "B.Cu",
-    )
+    layers: tuple[str, str] = ("F.Cu", "B.Cu")
 
     @model_validator(mode="after")
     def valid_via(self) -> RouteVia:
@@ -586,6 +643,11 @@ class RouteVia(FrozenModel):
             raise ValueError("via drill must be smaller than via diameter")
         if self.layers[0] == self.layers[1]:
             raise ValueError("via layers must differ")
+        if any(
+            re.fullmatch(r"(?:F|B|In(?:[1-9]|[12][0-9]|30))\.Cu", item) is None
+            for item in self.layers
+        ):
+            raise ValueError("via layers must be copper layer names")
         return self
 
 
@@ -852,7 +914,21 @@ class RoutingRequest(FrozenModel):
     existing_copper_policy: Literal["reject", "preserve"] = "reject"
     candidate_count: Annotated[int, Field(ge=1, le=2)] = 1
     max_passes: Annotated[int, Field(ge=1, le=200)] = 30
+    semantic_stagnation_passes: Annotated[int, Field(ge=1, le=50)] = 3
     thread_count: Annotated[int, Field(ge=0, le=64)] = 0
+    net_roles: dict[
+        str,
+        Literal[
+            "signal",
+            "ground",
+            "power",
+            "high_current",
+            "high_voltage",
+            "differential",
+            "switching",
+            "motor_phase",
+        ],
+    ] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def valid_request(self) -> RoutingRequest:
@@ -862,7 +938,117 @@ class RoutingRequest(FrozenModel):
             raise ValueError("routing net names must be unique")
         if any(not item.strip() for item in self.nets):
             raise ValueError("routing net names must not be empty")
+        if any(not item.strip() for item in self.net_roles):
+            raise ValueError("routing net role names must not be empty")
+        if self.nets and not set(self.net_roles).issubset(self.nets):
+            raise ValueError("explicit routing net roles must reference requested nets")
         return self
+
+
+class FreeRoutingPassMetric(FrozenModel):
+    """Bounded progress evidence parsed from one FreeRouting autorouter pass."""
+
+    pass_number: Annotated[int, Field(ge=1)]
+    board_incomplete_count: Annotated[int, Field(ge=0)] | None = None
+    queued_item_count: Annotated[int, Field(ge=0)] | None = None
+    board_unrouted_count: Annotated[int, Field(ge=0)] | None = None
+    failure_count: Annotated[int, Field(ge=0)] = 0
+    duration_seconds: Annotated[float, Field(ge=0)] | None = None
+    score: float | None = None
+    cpu_seconds: Annotated[float, Field(ge=0)] | None = None
+    allocated_memory_gb: Annotated[float, Field(ge=0)] | None = None
+    connections_resolved: Annotated[int, Field(ge=0)] = 0
+    connections_resolved_per_pass: Annotated[float, Field(ge=0)] = 0
+
+
+class ConnectivityMetricRecord(FrozenModel):
+    """Versioned private observation for connectivity and routing regression analysis."""
+
+    schema_version: Literal[2, 3, 4] = 4
+    run_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    parent_run_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
+    operation: Literal["routing_proposal", "routing_change"] = "routing_proposal"
+    phase: Literal["baseline", "candidate", "prepare", "validate", "apply", "rollback"]
+    outcome: Literal["success", "failure"]
+    started_at: datetime
+    finished_at: datetime
+    duration_seconds: Annotated[float, Field(ge=0)]
+    project_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_hashes: dict[str, str] = Field(default_factory=dict)
+    board_width_mm: Annotated[float, Field(gt=0)] | None = None
+    board_height_mm: Annotated[float, Field(gt=0)] | None = None
+    copper_layer_count: Annotated[int, Field(ge=0)] = 0
+    footprint_count: Annotated[int, Field(ge=0)] = 0
+    pad_count: Annotated[int, Field(ge=0)] = 0
+    placement_density_percent: Annotated[float, Field(ge=0, le=100)] | None = None
+    backend: str
+    backend_version: str | None = None
+    strategy: Literal["prioritized", "sequential"] | None = None
+    effective_configuration: dict[str, str | int | float | bool] = Field(default_factory=dict)
+    requested_net_count: Annotated[int, Field(ge=0)] = 0
+    requested_net_role_counts: dict[str, Annotated[int, Field(ge=0)]] = Field(default_factory=dict)
+    baseline_routed_net_count: Annotated[int, Field(ge=0)] = 0
+    baseline_unrouted_net_count: Annotated[int, Field(ge=0)] = 0
+    final_routed_net_count: Annotated[int, Field(ge=0)] | None = None
+    final_unrouted_net_count: Annotated[int, Field(ge=0)] | None = None
+    baseline_open_connection_count: Annotated[int, Field(ge=0)]
+    final_open_connection_count: Annotated[int, Field(ge=0)] | None = None
+    open_connection_delta: int | None = None
+    board_baseline_open_connection_count: Annotated[int, Field(ge=0)] | None = None
+    board_final_open_connection_count: Annotated[int, Field(ge=0)] | None = None
+    segment_count: Annotated[int, Field(ge=0)] = 0
+    via_count: Annotated[int, Field(ge=0)] = 0
+    routed_length_mm: Annotated[float, Field(ge=0)] = 0
+    baseline_drc_error_count: Annotated[int, Field(ge=0)] | None = None
+    final_drc_error_count: Annotated[int, Field(ge=0)] | None = None
+    new_drc_error_count: Annotated[int, Field(ge=0)] | None = None
+    baseline_drc_warning_count: Annotated[int, Field(ge=0)] | None = None
+    final_drc_warning_count: Annotated[int, Field(ge=0)] | None = None
+    new_drc_warning_count: Annotated[int, Field(ge=0)] | None = None
+    error_code: ErrorCode | None = None
+    watchdog_reason: str | None = None
+    freerouting_pass_metrics: tuple[FreeRoutingPassMetric, ...] = ()
+    freerouting_normalization_count: Annotated[int, Field(ge=0)] = 0
+    best_pass_number: Annotated[int, Field(ge=1)] | None = None
+    failed_route_count: Annotated[int, Field(ge=0)] = 0
+    stagnation_count: Annotated[int, Field(ge=0)] = 0
+    cpu_seconds: Annotated[float, Field(ge=0)] | None = None
+    peak_memory_gb: Annotated[float, Field(ge=0)] | None = None
+    copper_produced_per_second: Annotated[float, Field(ge=0)] = 0
+    connections_resolved_per_pass: Annotated[float, Field(ge=0)] = 0
+    diagnostic_only: bool = False
+    applicable: bool = True
+
+
+class RoutingBatchComparison(FrozenModel):
+    """Sanitized comparison of one batch against an identical board baseline."""
+
+    run_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    requested_net_count: Annotated[int, Field(ge=0)]
+    requested_net_role_counts: dict[str, Annotated[int, Field(ge=0)]] = Field(default_factory=dict)
+    best_open_connection_delta: int | None = None
+    best_pass_number: Annotated[int, Field(ge=1)] | None = None
+    duration_seconds: Annotated[float, Field(ge=0)] = 0
+    copper_produced_per_second: Annotated[float, Field(ge=0)] = 0
+    connections_resolved_per_pass: Annotated[float, Field(ge=0)] = 0
+
+
+class ConnectivityMetricRunSummary(FrozenModel):
+    """Sanitized optimization view over the records emitted for one routing run."""
+
+    schema_version: Literal[1] = 1
+    run_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    record_count: Annotated[int, Field(ge=1)]
+    records: Annotated[tuple[ConnectivityMetricRecord, ...], Field(min_length=1)]
+    best_strategy: Literal["prioritized", "sequential"] | None = None
+    best_open_connection_delta: int | None = None
+    comparable_candidate_count: Annotated[int, Field(ge=0)] = 0
+    failed_candidate_count: Annotated[int, Field(ge=0)] = 0
+    best_observed_pass_number: Annotated[int, Field(ge=1)] | None = None
+    highest_stagnation_count: Annotated[int, Field(ge=0)] = 0
+    watchdog_reasons: tuple[str, ...] = ()
+    recommended_max_passes: Annotated[int, Field(ge=1, le=200)] | None = None
+    same_baseline_batches: tuple[RoutingBatchComparison, ...] = ()
 
 
 class RoutingCandidateEvaluation(FrozenModel):
@@ -879,19 +1065,52 @@ class RoutingCandidateEvaluation(FrozenModel):
     track_length_mm: Annotated[float, Field(ge=0)]
     fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     duplicate_of: Literal["prioritized", "sequential"] | None = None
+    backend_elapsed_seconds: Annotated[float, Field(ge=0)] = 0
+    freerouting_pass_metrics: tuple[FreeRoutingPassMetric, ...] = ()
+    freerouting_normalization_count: Annotated[int, Field(ge=0)] = 0
+    applicable: bool = True
+    diagnostic_only: bool = False
+    failure_reason: str | None = None
+    copper_produced_per_second: Annotated[float, Field(ge=0)] = 0
+    connections_resolved_per_pass: Annotated[float, Field(ge=0)] = 0
+
+
+class RoutingHotspot(FrozenModel):
+    """Local congestion evidence suitable for a placement rework proposal."""
+
+    references: Annotated[tuple[str, ...], Field(min_length=1, max_length=12)]
+    connection_count: Annotated[int, Field(ge=1)]
+    total_airwire_length_mm: Annotated[float, Field(gt=0)]
+    center_x_mm: float
+    center_y_mm: float
+    radius_mm: Annotated[float, Field(gt=0)]
+    recommendation: str
 
 
 class RoutingBackendStatus(FrozenModel):
     """Availability of the fixed-command local PCB autorouting backend."""
 
-    name: Literal["FreeRouting", "Copperbrain two-layer orthogonal router"] = "FreeRouting"
+    name: Literal["FreeRouting"] = "FreeRouting"
     available: bool
     version: str | None = None
     java_major_version: Annotated[int, Field(ge=1)] | None = None
     java_path: Path | None = None
     jar_path: Path | None = None
     kicad_python_path: Path | None = None
+    scoped_routing_supported: bool = False
+    capability_path: Path | None = None
+    capability_reason: str | None = None
     reason: str | None = None
+
+
+class FreeRoutingCapabilityRecord(FrozenModel):
+    """Hash-bound claims for behavior not discoverable from the FreeRouting version alone."""
+
+    schema_version: Literal[1] = 1
+    jar_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    scoped_net_classes_cli: bool = False
+    source_commit: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    description: str | None = None
 
 
 class RoutingPlan(FrozenModel):
@@ -904,7 +1123,11 @@ class RoutingPlan(FrozenModel):
     predicted_complete: bool
     backend: Literal["freerouting", "test"] = "freerouting"
     backend_version: str | None = None
+    metrics_run_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
     candidate_evaluations: tuple[RoutingCandidateEvaluation, ...] = ()
+    routing_hotspots: tuple[RoutingHotspot, ...] = ()
+    placement_rework_recommended: bool = False
+    recommended_max_passes: Annotated[int, Field(ge=1, le=200)] | None = None
     evidence: tuple[str, ...] = ()
     assumptions: tuple[str, ...] = ()
 
@@ -1043,7 +1266,9 @@ class PcbFinalizationResult(FrozenModel):
 
 class PlacementRequest(FrozenModel):
     references: Annotated[tuple[str, ...], Field(min_length=1)]
-    strategy: Literal["grid", "compact"] = "compact"
+    strategy: Literal["grid", "compact", "routing_coherent"] = "compact"
+    existing_copper_policy: Literal["ignore", "preserve_anchors"] = "ignore"
+    anchor_ground_copper: bool = True
     region: PcbBounds | None = None
     spacing_mm: Annotated[float, Field(ge=0)] = 1.0
     routing_corridor_mm: Annotated[float, Field(ge=0)] = 0.8
