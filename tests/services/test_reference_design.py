@@ -13,6 +13,10 @@ from copperbrain.services.reference_design import (
     motor_driver_bench_manufacturing_profile,
     motor_driver_bench_operations,
     motor_driver_bench_rule_requirements,
+    twelve_to_forty_eight_boost_layout_plan,
+    twelve_to_forty_eight_boost_manufacturing_profile,
+    twelve_to_forty_eight_boost_operations,
+    twelve_to_forty_eight_boost_rule_requirements,
 )
 
 
@@ -72,6 +76,43 @@ def test_48v_reference_design_rejects_incompatible_regulator() -> None:
     )
     with pytest.raises(ValueError, match="LM5576"):
         forty_eight_to_twelve_operations(candidate)
+
+
+def test_12v_to_48v_boost_benchmark_is_bounded_and_reviewable() -> None:
+    operations = twelve_to_forty_eight_boost_operations()
+    added = {item.target for item in operations if item.kind == "add_component"}
+    labels = {str(item.parameters.get("text")) for item in operations if item.kind == "label"}
+
+    assert {"U1", "Q1", "L1", "D1", "RS1", "J1", "J2", "F1", "F2"} <= added
+    assert {"VIN_RAW", "VIN_PROTECTED", "SW", "VOUT_PRE_FUSE", "VOUT48", "GND"} <= labels
+    assert sum(item.kind == "relayout_pin_label" for item in operations) == sum(
+        item.kind == "label" for item in operations
+    )
+    assert any(
+        item.kind == "update_property"
+        and item.target == "U1"
+        and item.parameters.get("name") == "DesignNote"
+        and "PROVISIONAL" in str(item.parameters.get("value"))
+        for item in operations
+    )
+
+    layout = twelve_to_forty_eight_boost_layout_plan()
+    placements = {item.reference: item for item in layout.placements}
+    assert (placements["R6"].x_mm, placements["R7"].x_mm) == (70, 74)
+    assert placements["R6"].layer == placements["R7"].layer == "B.Cu"
+    assert (layout.outline.width_mm, layout.outline.height_mm) == (90, 60)
+    assert {item.reference for item in layout.placements} == {
+        reference for reference in added if not reference.startswith("#")
+    }
+    assert len(layout.mounting_holes) == 4
+
+    profile = twelve_to_forty_eight_boost_manufacturing_profile()
+    requirements = twelve_to_forty_eight_boost_rule_requirements()
+    assert profile.copper_thickness_um == 35
+    assert next(item for item in requirements if item.name == "CB_BOOST_INPUT").current_a == 5
+    output = next(item for item in requirements if item.name == "CB_BOOST_48V")
+    assert output.voltage_v == 48
+    assert output.current_a == 0.75
 
 
 def test_motor_driver_benchmark_has_power_control_rs485_and_four_sensor_inputs() -> None:

@@ -118,6 +118,37 @@ def test_prepare_apply_and_rollback_preserve_live_project_until_confirmation(
     assert not (project.parent / "demo.kicad_dru").exists()
 
 
+def test_rule_change_can_apply_and_rollback_after_service_restart(tmp_path: Path) -> None:
+    service, project, session = setup(tmp_path)
+    original = project.read_bytes()
+    proposal = service.propose(session, ManufacturingProfile(), (requirement(),))
+    change = service.prepare(session, proposal)
+
+    restarted, _, _ = setup_existing(tmp_path, project.parent)
+    applied = restarted.apply(change.id, confirmed=True, editor_closed=True)
+    assert applied.status is ChangeStatus.APPLIED
+    assert (project.parent / "demo.kicad_dru").is_file()
+
+    restarted_again, _, _ = setup_existing(tmp_path, project.parent)
+    rolled_back = restarted_again.rollback(change.id, confirmed=True, editor_closed=True)
+    assert rolled_back.status is ChangeStatus.ROLLED_BACK
+    assert project.read_bytes() == original
+    assert not (project.parent / "demo.kicad_dru").exists()
+
+
+def setup_existing(tmp_path: Path, root: Path) -> tuple[PcbRuleService, Path, str]:
+    project = root / "demo.kicad_pro"
+    projects = ProjectService()
+    session = projects.open_project(root)
+    service = PcbRuleService(
+        projects,
+        tmp_path / "data",
+        drc_runner=lambda pcb: DrcReport(available=False),
+        footprint_validator=lambda path: ValidationReport(valid=True),
+    )
+    return service, project, session.id
+
+
 def test_apply_refuses_rule_file_that_appeared_after_prepare(tmp_path: Path) -> None:
     service, project, session = setup(tmp_path)
     proposal = service.propose(session, ManufacturingProfile(), (requirement(),))
@@ -199,3 +230,60 @@ def test_fine_pitch_component_gets_local_neckdown_and_courtyard(tmp_path: Path) 
     assert '(layer "F.CrtYd")' in footprint.read_text(encoding="utf-8")
     service.rollback(change.id, confirmed=True, editor_closed=True)
     assert '(layer "F.CrtYd")' not in footprint.read_text(encoding="utf-8")
+
+
+def test_single_net_footprint_has_no_false_clearance_failure(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "demo.kicad_pro").write_text(
+        json.dumps({"net_settings": {"classes": [], "netclass_patterns": []}}),
+        encoding="utf-8",
+    )
+    (root / "demo.kicad_sch").write_text("fixture", encoding="utf-8")
+    library = root / "copperbrain-libs" / "CB.pretty"
+    library.mkdir(parents=True)
+    (library / "TestPoint.kicad_mod").write_text(
+        """(footprint "TestPoint" (version 20241229) (layer "F.Cu")
+        (fp_circle (center 0 0) (end 1 0) (stroke (width 0.05) (type solid))
+          (fill none) (layer "F.CrtYd"))
+        (pad "1" thru_hole circle (at 0 0) (size 2 2) (drill 1)
+          (layers "*.Cu" "*.Mask")))""",
+        encoding="utf-8",
+    )
+    (root / "fp-lib-table").write_text(
+        '(fp_lib_table (lib (name "CB")(type "KiCad")'
+        '(uri "${KIPRJMOD}/copperbrain-libs/CB.pretty")))',
+        encoding="utf-8",
+    )
+    projects = ProjectService()
+    session = projects.open_project(root)
+    summary = ProjectSummary(
+        session_id=session.id,
+        sheets=("demo.kicad_sch",),
+        components=(Component(reference="TP1", value="TP", footprint="CB:TestPoint"),),
+        nets=(Net(name="/POWER", pins=(NetPin(reference="TP1", pin="1"),)),),
+        power_symbols=(),
+    )
+    projects.summary = lambda session_id: summary  # type: ignore[method-assign]
+    service = PcbRuleService(
+        projects,
+        tmp_path / "data",
+        drc_runner=lambda pcb: DrcReport(available=False),
+        footprint_validator=lambda path: ValidationReport(valid=True),
+    )
+    proposal = service.propose(
+        session.id,
+        ManufacturingProfile(),
+        (
+            NetRuleRequirement(
+                name="POWER",
+                nets=("/POWER",),
+                role="high_current",
+                track_width_mm=1.82,
+                clearance_mm=0.3,
+            ),
+        ),
+    )
+    assert proposal.fanout_constraints[0].reference == "TP1"
+    assert proposal.fanout_constraints[0].clearance_mm == 0.2
+    assert proposal.fanout_constraints[0].pad_min_clearance_mm == 0.3

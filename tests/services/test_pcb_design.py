@@ -129,6 +129,38 @@ def test_prepare_apply_and_byte_exact_rollback(
     assert pcb.read_bytes() == original
 
 
+def test_placement_can_apply_and_rollback_after_service_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, pcb, session = setup(tmp_path, monkeypatch)
+    original = pcb.read_bytes()
+    change = service.prepare(session, (PlacementOperation(reference="R1", x_mm=15, y_mm=15),))
+
+    restarted = restart_service(tmp_path, pcb.parent)
+    assert (
+        restarted.apply(change.id, confirmed=True, editor_closed=True).status
+        is ChangeStatus.APPLIED
+    )
+    assert pcb.read_bytes() != original
+
+    restarted_again = restart_service(tmp_path, pcb.parent)
+    assert (
+        restarted_again.rollback(change.id, confirmed=True, editor_closed=True).status
+        is ChangeStatus.ROLLED_BACK
+    )
+    assert pcb.read_bytes() == original
+
+
+def restart_service(tmp_path: Path, root: Path) -> PcbDesignService:
+    projects = ProjectService()
+    projects.open_project(root)
+    return PcbDesignService(
+        projects,
+        tmp_path / "data",
+        drc_runner=lambda path: DrcReport(available=True),
+    )
+
+
 def test_preserve_anchors_refuses_to_move_fully_routed_fixture(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

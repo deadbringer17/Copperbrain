@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import tempfile
 import uuid
@@ -29,6 +30,7 @@ from copperbrain.models import (
     DrcReport,
     ErcReport,
     ErrorCode,
+    PcbLayoutChangeRecord,
     PcbLayoutChangeSet,
     PcbLayoutPlan,
     PlacementAnalysis,
@@ -72,6 +74,72 @@ class PcbLayoutService:
         self.pcb_adapter = PcbFileAdapter()
         self.schematic_adapter = SchematicApiAdapter()
         self._changes: dict[str, _PreparedLayout] = {}
+
+    @property
+    def _records_dir(self) -> Path:
+        return self.data_dir / "pcb-layout-changes"
+
+    def _record_path(self, change_set_id: str) -> Path:
+        if re.fullmatch(r"[0-9a-f]{32}", change_set_id) is None:
+            raise CopperbrainError(ErrorCode.INVALID_INPUT, "PCB layout identifier is invalid")
+        return self._records_dir / f"{change_set_id}.json"
+
+    def _persist(self, prepared: _PreparedLayout, project_root: Path) -> None:
+        root = project_root.resolve()
+        record = PcbLayoutChangeRecord(
+            project_root=root,
+            workspace=prepared.workspace.resolve(),
+            affected_relative_files=tuple(
+                path.resolve().relative_to(root) for path in prepared.change_set.affected_files
+            ),
+            change_set=prepared.change_set,
+            snapshot=prepared.snapshot.resolve() if prepared.snapshot is not None else None,
+        )
+        path = self._record_path(prepared.change_set.id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+                stream.write(record.model_dump_json(indent=2))
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+    def _load(self, change_set_id: str) -> _PreparedLayout:
+        try:
+            record = PcbLayoutChangeRecord.model_validate_json(
+                self._record_path(change_set_id).read_text(encoding="utf-8")
+            )
+        except FileNotFoundError as exc:
+            raise CopperbrainError(
+                ErrorCode.NOT_FOUND, "PCB layout change set was not found"
+            ) from exc
+        except (OSError, ValueError) as exc:
+            raise CopperbrainError(
+                ErrorCode.VALIDATION_FAILED,
+                "Persisted PCB layout change set is invalid",
+                details={"reason": str(exc)},
+            ) from exc
+        workspace = record.workspace.resolve()
+        private_root = (self.data_dir / "workspaces").resolve()
+        if not workspace.is_relative_to(private_root) or not workspace.is_dir():
+            raise CopperbrainError(ErrorCode.CONFLICT, "PCB layout workspace is unavailable")
+        session = self.projects.open_project(record.project_root)
+        affected = tuple(session.root / path for path in record.affected_relative_files)
+        snapshot = record.snapshot.resolve() if record.snapshot is not None else None
+        prepared = _PreparedLayout(
+            change_set=record.change_set.model_copy(
+                update={"session_id": session.id, "affected_files": affected}
+            ),
+            workspace=workspace,
+            snapshot=snapshot,
+        )
+        self._changes[change_set_id] = prepared
+        return prepared
 
     @staticmethod
     def _current_hashes(session: ProjectSession) -> dict[str, str]:
@@ -221,15 +289,11 @@ class PcbLayoutService:
             status=status,
         )
         self._changes[identifier] = _PreparedLayout(change_set, workspace)
+        self._persist(self._changes[identifier], session.root)
         return change_set
 
     def _get(self, change_set_id: str) -> _PreparedLayout:
-        try:
-            return self._changes[change_set_id]
-        except KeyError as exc:
-            raise CopperbrainError(
-                ErrorCode.NOT_FOUND, "PCB layout change set was not found"
-            ) from exc
+        return self._changes.get(change_set_id) or self._load(change_set_id)
 
     def validate(
         self, change_set_id: str
@@ -281,6 +345,7 @@ class PcbLayoutService:
         prepared.change_set = change_set.model_copy(
             update={"status": ChangeStatus.APPLIED, "snapshot_id": snapshot_id}
         )
+        self._persist(prepared, session.root)
         return prepared.change_set
 
     def rollback(
@@ -306,4 +371,5 @@ class PcbLayoutService:
         prepared.change_set = prepared.change_set.model_copy(
             update={"status": ChangeStatus.ROLLED_BACK}
         )
+        self._persist(prepared, session.root)
         return prepared.change_set

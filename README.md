@@ -21,12 +21,24 @@ Run the stdio MCP server with `uv run copperbrain`.
 
 Run the non-destructive offline demo with `uv run python scripts/run_demo.py`.
 
+## Three acceptance gates
+
+The public MCP exposes exactly three tools that accept a validated mutation:
+
+1. `accept_schematic` for the project scaffold or schematic change set.
+2. `accept_design_rules` for reviewed widths, clearances, vias, netclasses, and assignments.
+3. `accept_pcb` for one aggregate placement, grounding, and routing change set prepared with
+   `prepare_pcb_acceptance` and rechecked with `validate_pcb_acceptance`.
+
+Granular apply/rollback functions are internal and are not MCP tools. Read-only analysis and
+granular prepare/preview/validate tools remain available. `rollback_accepted_phase` is an explicit
+recovery command, not another acceptance gate.
+
 To start a new design safely, call `prepare_project_creation` with an existing parent directory
 and a typed name/layer count. Copperbrain creates the schematic through `kicad-sch-api`, creates
 the empty board through KiCad's bundled Python API, validates both files, and publishes only a
 preview under `<new-project>/copperbrain-output/previews/<change-set-id>/`.
-`apply_project_creation` requires explicit confirmation before the three source files appear;
-`rollback_project_creation` removes them only while their post-apply hashes still match.
+`accept_schematic` applies the validated scaffold; recovery remains hash guarded.
 
 For an opened KiCad project, Copperbrain writes every deliverable artifact below
 `<project>/copperbrain-output/`: prepared project/PDF previews under `previews/` and BOM exports
@@ -38,8 +50,8 @@ project.
 Use `analyze_pcb_constraints` to inspect current netclasses and receive evidence-backed net-role
 suggestions. Pass reviewed fabrication limits and electrical intent to `propose_design_rules`,
 then use `prepare_pcb_rule_change`, `validate_pcb_rule_change`, and
-`apply_pcb_rule_change`. Applying always requires explicit confirmation and a saved, closed KiCad
-editor; `rollback_pcb_rule_change` restores the snapshot.
+`accept_design_rules`. Applying requires the second acceptance and a saved, closed KiCad editor;
+`rollback_accepted_phase` restores the phase snapshot when explicitly invoked.
 
 `ManufacturingProfile` covers minimum clearance/track/via dimensions, copper thickness, allowed
 temperature rise, and internal/external current layer. `NetRuleRequirement` covers exact net names,
@@ -72,8 +84,8 @@ allows automatic bottom placement only for small SMD passives.
 Pass the returned operations to `prepare_placement_change`. Copperbrain changes only a private
 project copy, exports `Copperbrain-PCB-preview.pdf`, runs comparative DRC, and publishes the copy
 under `<project>/copperbrain-output/previews/<change-set-id>/`. Use
-`validate_placement_change`, then `apply_placement_change` with explicit confirmation and a saved,
-closed PCB Editor. `rollback_placement_change` restores the byte-exact snapshot.
+`validate_placement_change`. The reviewed operations are then supplied to
+`prepare_pcb_acceptance`; no separate placement acceptance is exposed.
 
 The official `kicad-python` IPC binding is installed and detected dynamically for live board
 transactions. PCB inspection and safe preview do not require a running editor: the typed file
@@ -104,9 +116,9 @@ fabrication process. Existing selected-net zones are replaced only when
 `replace_existing_planes=true` is explicitly requested.
 
 The result is only a private preview with comparative DRC and a grounding-connectivity report.
-Use `validate_grounding_pcb`, then `apply_grounding_pcb` with explicit confirmation and a saved,
-closed PCB Editor. The KiCad Project Manager may remain open: only a PCB document lock blocks the
-mutation. `rollback_grounding_pcb` restores the byte-exact pre-grounding board. Ambiguous
+Use `validate_grounding_pcb`, then include the reviewed request in `prepare_pcb_acceptance`. The
+KiCad Project Manager may remain open: only a PCB document lock blocks the final aggregate
+mutation. `rollback_accepted_phase` restores the aggregate PCB snapshot. Ambiguous
 domain roles, overlapping layer assignments, missing/ambiguous bridges, unsafe fanouts, or new DRC
 errors cause a structured refusal.
 The workflow does not accept polygons or KiCad expressions from callers, and it does not claim
@@ -121,9 +133,9 @@ It synchronizes footprints in a private copy, builds the unrouted PCB through th
 comparative ERC/DRC and placement analysis, and publishes a PDF/project preview below
 `copperbrain-output/previews/<change-set-id>/`.
 
-Use `validate_pcb_layout_change` to repeat all gates. `apply_pcb_layout_change` requires explicit
-confirmation and a closed editor; `rollback_pcb_layout_change` restores the snapshot. These tools
-do not autoroute or generate tracks, copper zones, keepouts, or manufacturing outputs.
+Use `validate_pcb_layout_change` for evidence. Its reviewed placement feeds the aggregate PCB
+change; there is no separate layout acceptance. These tools do not autoroute or generate tracks,
+copper zones, keepouts, or manufacturing outputs.
 
 The bounded `test_bench_pico` reference helper demonstrates this flow for a provisional 12 V,
 20 A brushed-DC H-bridge using DRV8701, four external 60 V MOSFETs, ATtiny1616, half-duplex
@@ -161,9 +173,9 @@ outside the requested net set.
 Pass the reviewed plan to `prepare_routing_change`. Copperbrain writes only a private copy,
 refills zones through KiCad after typed copper insertion, rechecks selected-net connectivity, runs comparative KiCad DRC, exports
 `Copperbrain-PCB-routing-preview.pdf`, and publishes the project preview below
-`copperbrain-output/previews/<change-set-id>/`. Only a complete, DRC-valid plan can be applied with
-`apply_routing_change`, explicit confirmation, and a closed editor. `rollback_routing_change`
-restores the byte-exact PCB snapshot. Prepared routing state is persisted below
+`copperbrain-output/previews/<change-set-id>/`. Reviewed routing batches are composed with grounding
+by `prepare_pcb_acceptance`; only the complete, DRC-valid aggregate can be applied by `accept_pcb`
+with the third acceptance and a closed editor. Prepared routing state is persisted below
 `COPPERBRAIN_DATA_DIR`, so validate/apply/rollback and `get_routing_change_summary` survive an MCP
 restart. The KiCad Project Manager may remain open; only a PCB-document lock blocks routing
 apply/rollback. Boards containing pre-existing copper are rejected by default; explicitly select the
@@ -180,8 +192,8 @@ Call `get_connectivity_metrics` with that ID for a bounded, sanitized optimizati
 the best observed pass, connection delta, failed-candidate count, stagnation, and watchdog causes.
 New records use schema 3 while the reader remains compatible with persisted schema-2 records.
 
-For the compact end-to-end surface, call `prepare_pcb_finalization`, review its summary, then use
-`validate_pcb_finalization` and `apply_pcb_finalization`. `assess_pcb_readiness` and
+For the compact end-to-end surface, call `prepare_pcb_acceptance`, review its preview, then use
+`validate_pcb_acceptance` and `accept_pcb`. `assess_pcb_readiness` and
 `get_pcb_finalization_report` intentionally keep `production_ready=false` when DFM, stackup,
 thermal, SI/PI, EMC, or impedance checks have not been performed, even if routing/ERC/DRC pass.
 

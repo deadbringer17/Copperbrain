@@ -115,11 +115,14 @@ def test_read_only_cli_restores_incidental_project_local_state(
     schematic = tmp_path / "demo.kicad_sch"
     schematic.write_text("fixture", encoding="utf-8")
     local_state = schematic.with_suffix(".kicad_prl")
+    project_state = schematic.with_suffix(".kicad_pro")
+    project_state.write_bytes(b"user-project")
     if existing:
         local_state.write_bytes(b"user-state")
 
     def run(command: list[str], *, timeout: float = 60) -> subprocess.CompletedProcess[str]:
         local_state.write_bytes(b"incidental-cli-state")
+        project_state.write_bytes(b"incidental-project-defaults")
         Path(command[command.index("--output") + 1]).write_bytes(b"pdf")
         return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -130,6 +133,7 @@ def test_read_only_cli_restores_incidental_project_local_state(
         assert local_state.read_bytes() == b"user-state"
     else:
         assert not local_state.exists()
+    assert project_state.read_bytes() == b"user-project"
 
 
 def test_export_schematic_pdf_requires_cli(tmp_path: Path) -> None:

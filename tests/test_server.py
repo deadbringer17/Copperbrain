@@ -44,11 +44,15 @@ def part(lcsc: str = "C1") -> ComponentCandidate:
 def test_server_exposes_complete_mvp_contract() -> None:
     names = set(mcp._tool_manager._tools)
     assert names == {
+        "accept_schematic",
+        "accept_design_rules",
+        "prepare_pcb_acceptance",
+        "validate_pcb_acceptance",
+        "accept_pcb",
+        "rollback_accepted_phase",
         "detect_kicad",
         "prepare_project_creation",
         "validate_project_creation",
-        "apply_project_creation",
-        "rollback_project_creation",
         "open_project",
         "get_project_summary",
         "analyze_schematic",
@@ -59,8 +63,6 @@ def test_server_exposes_complete_mvp_contract() -> None:
         "propose_design_rules",
         "prepare_pcb_rule_change",
         "validate_pcb_rule_change",
-        "apply_pcb_rule_change",
-        "rollback_pcb_rule_change",
         "get_pcb_summary",
         "inspect_pcb_net",
         "get_footprint_placement",
@@ -68,12 +70,8 @@ def test_server_exposes_complete_mvp_contract() -> None:
         "propose_component_placement",
         "prepare_placement_change",
         "validate_placement_change",
-        "apply_placement_change",
-        "rollback_placement_change",
         "grounding_pcb",
         "validate_grounding_pcb",
-        "apply_grounding_pcb",
-        "rollback_grounding_pcb",
         "export_pcb_preview",
         "get_routing_backend_status",
         "get_connectivity_metrics",
@@ -81,19 +79,13 @@ def test_server_exposes_complete_mvp_contract() -> None:
         "propose_pcb_routing",
         "prepare_routing_change",
         "validate_routing_change",
-        "apply_routing_change",
-        "rollback_routing_change",
-        "restore_routing_snapshot",
         "get_routing_change_summary",
         "assess_pcb_readiness",
         "prepare_pcb_finalization",
         "validate_pcb_finalization",
-        "apply_pcb_finalization",
         "get_pcb_finalization_report",
         "prepare_pcb_layout_change",
         "validate_pcb_layout_change",
-        "apply_pcb_layout_change",
-        "rollback_pcb_layout_change",
         "search_components",
         "get_component_details",
         "compare_components",
@@ -102,12 +94,37 @@ def test_server_exposes_complete_mvp_contract() -> None:
         "import_component_assets",
         "prepare_schematic_change",
         "validate_change",
-        "apply_change",
-        "rollback_change",
         "generate_bom",
         "estimate_bom_cost",
         "suggest_bom_substitutions",
     }
+
+
+def test_server_exposes_exactly_three_explicit_acceptance_gates() -> None:
+    tools = mcp._tool_manager._tools
+    confirmed_tools = {
+        name for name, tool in tools.items() if "confirmed" in tool.parameters.get("properties", {})
+    }
+    assert confirmed_tools == {"accept_schematic", "accept_design_rules", "accept_pcb"}
+
+
+def test_aggregate_acceptance_transport_wrappers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server.project_creation, "apply", lambda *args, **kwargs: Dump())
+    monkeypatch.setattr(server.changes, "apply", lambda *args, **kwargs: Dump())
+    monkeypatch.setattr(server.pcb_rules, "apply", lambda *args, **kwargs: Dump())
+    monkeypatch.setattr(server.pcb_phase, "prepare", lambda *args, **kwargs: Dump())
+    monkeypatch.setattr(server.pcb_phase, "validate", lambda *args, **kwargs: Dump())
+    monkeypatch.setattr(server.pcb_phase, "apply", lambda *args, **kwargs: Dump())
+    monkeypatch.setattr(server.pcb_phase, "rollback", lambda *args, **kwargs: Dump())
+
+    assert server.accept_schematic("c", "project_creation", True)["ok"]
+    assert server.accept_schematic("c", "schematic", True)["ok"]
+    assert server.accept_design_rules("c", True, True)["ok"]
+    request = {"routing_batches": [{"nets": ["/SIG"]}]}
+    assert server.prepare_pcb_acceptance("s", request)["ok"]
+    assert server.validate_pcb_acceptance("c")["ok"]
+    assert server.accept_pcb("c", True, True)["ok"]
+    assert server.rollback_accepted_phase("pcb", "c")["ok"]
 
 
 def test_resolve_asset_preserves_local_path_and_rejects_url_extension() -> None:

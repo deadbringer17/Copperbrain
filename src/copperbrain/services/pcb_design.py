@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import shutil
 import tempfile
 import uuid
@@ -25,6 +26,7 @@ from copperbrain.models import (
     PcbFootprintPlacement,
     PcbNetInspection,
     PcbPadInspection,
+    PcbPlacementChangeRecord,
     PcbPlacementChangeSet,
     PcbSummary,
     PlacementAnalysis,
@@ -111,6 +113,71 @@ class PcbDesignService:
         )
         self.zone_refiller = zone_refiller
         self._changes: dict[str, _PreparedPlacement] = {}
+
+    @property
+    def _records_dir(self) -> Path:
+        return self.data_dir / "pcb-placement-changes"
+
+    def _record_path(self, change_set_id: str) -> Path:
+        if re.fullmatch(r"[0-9a-f]{32}", change_set_id) is None:
+            raise CopperbrainError(ErrorCode.INVALID_INPUT, "Placement identifier is invalid")
+        return self._records_dir / f"{change_set_id}.json"
+
+    def _persist(self, prepared: _PreparedPlacement, project_root: Path) -> None:
+        root = project_root.resolve()
+        record = PcbPlacementChangeRecord(
+            project_root=root,
+            workspace=prepared.workspace.resolve(),
+            affected_relative_files=tuple(
+                path.resolve().relative_to(root) for path in prepared.change_set.affected_files
+            ),
+            change_set=prepared.change_set,
+            snapshot=prepared.snapshot.resolve() if prepared.snapshot is not None else None,
+        )
+        path = self._record_path(prepared.change_set.id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+                stream.write(record.model_dump_json(indent=2))
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+    def _load(self, change_set_id: str) -> _PreparedPlacement:
+        try:
+            record = PcbPlacementChangeRecord.model_validate_json(
+                self._record_path(change_set_id).read_text(encoding="utf-8")
+            )
+        except FileNotFoundError as exc:
+            raise CopperbrainError(
+                ErrorCode.NOT_FOUND, "Placement change set was not found"
+            ) from exc
+        except (OSError, ValueError) as exc:
+            raise CopperbrainError(
+                ErrorCode.VALIDATION_FAILED,
+                "Persisted placement change set is invalid",
+                details={"reason": str(exc)},
+            ) from exc
+        workspace = record.workspace.resolve()
+        private_root = (self.data_dir / "workspaces").resolve()
+        if not workspace.is_relative_to(private_root) or not workspace.is_dir():
+            raise CopperbrainError(ErrorCode.CONFLICT, "Placement workspace is unavailable")
+        session = self.projects.open_project(record.project_root)
+        affected = tuple(session.root / path for path in record.affected_relative_files)
+        prepared = _PreparedPlacement(
+            change_set=record.change_set.model_copy(
+                update={"session_id": session.id, "affected_files": affected}
+            ),
+            workspace=workspace,
+            snapshot=record.snapshot.resolve() if record.snapshot is not None else None,
+        )
+        self._changes[change_set_id] = prepared
+        return prepared
 
     def _session_pcb(self, session_id: str) -> tuple[ProjectSession, Path]:
         session = self.projects.get_session(session_id)
@@ -487,16 +554,16 @@ class PcbDesignService:
             preview_pdf=preview_pdf,
             status=status,
         )
-        self._changes[identifier] = _PreparedPlacement(change_set, workspace)
+        prepared = _PreparedPlacement(change_set, workspace)
+        self._changes[identifier] = prepared
+        self._persist(prepared, session.root)
         return change_set
 
     def _get(self, change_set_id: str) -> _PreparedPlacement:
         try:
             return self._changes[change_set_id]
-        except KeyError as exc:
-            raise CopperbrainError(
-                ErrorCode.NOT_FOUND, "Placement change set was not found"
-            ) from exc
+        except KeyError:
+            return self._load(change_set_id)
 
     def validate(self, change_set_id: str) -> tuple[ValidationReport, DrcReport]:
         prepared = self._get(change_set_id)
@@ -525,6 +592,7 @@ class PcbDesignService:
         current = self._current_hashes(session)
         if current != change_set.source_hashes:
             prepared.change_set = change_set.model_copy(update={"status": ChangeStatus.STALE})
+            self._persist(prepared, session.root)
             raise CopperbrainError(ErrorCode.CONFLICT, "Placement change set is stale")
         snapshot_id = uuid.uuid4().hex
         snapshot = self.data_dir / "snapshots" / snapshot_id
@@ -547,6 +615,7 @@ class PcbDesignService:
         prepared.change_set = change_set.model_copy(
             update={"status": ChangeStatus.APPLIED, "snapshot_id": snapshot_id}
         )
+        self._persist(prepared, session.root)
         return prepared.change_set
 
     def rollback(
@@ -572,6 +641,7 @@ class PcbDesignService:
         prepared.change_set = prepared.change_set.model_copy(
             update={"status": ChangeStatus.ROLLED_BACK}
         )
+        self._persist(prepared, session.root)
         return prepared.change_set
 
     def export_preview(self, session_id: str) -> Path:

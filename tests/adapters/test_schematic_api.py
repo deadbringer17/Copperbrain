@@ -120,3 +120,44 @@ def test_set_paper_size_rejects_non_allowlisted_size(tmp_path: Path) -> None:
                 ),
             ),
         )
+
+
+def test_relayout_pin_labels_extend_away_from_opposite_passive_pins(tmp_path: Path) -> None:
+    schematic = tmp_path / "passive.kicad_sch"
+    kicad_sch_api.create_schematic("passive").save(schematic)
+    operations = [
+        ChangeOperation(
+            kind="add_component",
+            target="C1",
+            parameters={"lib_id": "Device:C", "value": "1uF", "x": 100, "y": 100},
+        )
+    ]
+    for pin, net in (("1", "VIN"), ("2", "GND")):
+        operations.extend(
+            (
+                ChangeOperation(
+                    kind="label",
+                    target=f"{net}:C1.{pin}",
+                    parameters={"text": net, "reference": "C1", "pin": pin},
+                ),
+                ChangeOperation(
+                    kind="relayout_pin_label",
+                    target=f"{net}:C1.{pin}",
+                    parameters={
+                        "text": net,
+                        "reference": "C1",
+                        "pin": pin,
+                        "stub_length_mm": 10.16,
+                    },
+                ),
+            )
+        )
+
+    SchematicApiAdapter().apply(schematic, tuple(operations))
+
+    reloaded = kicad_sch_api.load_schematic(str(schematic))
+    component = reloaded.components.get("C1")
+    assert component is not None
+    label_y = {str(label.text): label.position.y for label in reloaded.labels}
+    assert label_y["VIN"] < component.position.y
+    assert label_y["GND"] > component.position.y

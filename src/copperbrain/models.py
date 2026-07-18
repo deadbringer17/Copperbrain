@@ -510,6 +510,17 @@ class PcbRuleChangeSet(FrozenModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class PcbRuleChangeRecord(FrozenModel):
+    """Private restart-safe state for a prepared PCB-rule mutation."""
+
+    project_root: Path
+    workspace: Path
+    affected_relative_files: tuple[Path, ...]
+    originally_existing: frozenset[str]
+    change_set: PcbRuleChangeSet
+    snapshot: Path | None = None
+
+
 class PcbBounds(FrozenModel):
     min_x_mm: float
     min_y_mm: float
@@ -899,6 +910,16 @@ class PcbGroundingChangeSet(FrozenModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class PcbGroundingChangeRecord(FrozenModel):
+    """Private restart-safe state for a prepared PCB-grounding mutation."""
+
+    project_root: Path
+    workspace: Path
+    affected_relative_files: tuple[Path, ...]
+    change_set: PcbGroundingChangeSet
+    snapshot: Path | None = None
+
+
 class RoutingRequest(FrozenModel):
     """Deterministic routing intent; no raw KiCad syntax is accepted."""
 
@@ -1264,6 +1285,48 @@ class PcbFinalizationResult(FrozenModel):
     confirmation_required: bool
 
 
+class PcbPhaseRequest(FrozenModel):
+    """One aggregate PCB recipe covered by the final PCB acceptance gate."""
+
+    placement_operations: tuple[PlacementOperation, ...] = ()
+    grounding: GroundingRequest = Field(default_factory=GroundingRequest)
+    routing_batches: Annotated[tuple[RoutingRequest, ...], Field(min_length=1)]
+    require_board_complete: bool = True
+
+
+class PcbPhaseChangeSet(FrozenModel):
+    """Validated placement, grounding, and routing composed in one private workspace."""
+
+    id: str
+    session_id: str
+    project_hash: str
+    request: PcbPhaseRequest
+    affected_files: tuple[Path, ...]
+    source_hashes: dict[str, str]
+    child_change_set_ids: tuple[str, ...]
+    metrics_run_ids: tuple[str, ...] = ()
+    semantic_diff: tuple[str, ...]
+    risks: tuple[str, ...]
+    validation_report: ValidationReport
+    drc: DrcReport
+    routing_analysis: RoutingAnalysis
+    preview_directory: Path
+    preview_pdf: Path | None = None
+    status: ChangeStatus = ChangeStatus.PREPARED
+    snapshot_id: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class PcbPhaseChangeRecord(FrozenModel):
+    """Private restart-safe state for an aggregate PCB acceptance."""
+
+    project_root: Path
+    workspace: Path
+    affected_relative_files: tuple[Path, ...]
+    change_set: PcbPhaseChangeSet
+    snapshot: Path | None = None
+
+
 class PlacementRequest(FrozenModel):
     references: Annotated[tuple[str, ...], Field(min_length=1)]
     strategy: Literal["grid", "compact", "routing_coherent"] = "compact"
@@ -1322,6 +1385,16 @@ class PcbPlacementChangeSet(FrozenModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class PcbPlacementChangeRecord(FrozenModel):
+    """Private restart-safe state for a prepared PCB-placement mutation."""
+
+    project_root: Path
+    workspace: Path
+    affected_relative_files: tuple[Path, ...]
+    change_set: PcbPlacementChangeSet
+    snapshot: Path | None = None
+
+
 class RectangularBoardOutline(FrozenModel):
     min_x_mm: float = 80.0
     min_y_mm: float = 80.0
@@ -1372,6 +1445,24 @@ class PcbLayoutChangeSet(FrozenModel):
     status: ChangeStatus = ChangeStatus.PREPARED
     snapshot_id: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
+
+
+class PcbLayoutChangeRecord(FrozenModel):
+    """Private restart-safe envelope for a prepared PCB layout."""
+
+    schema_version: Literal[1] = 1
+    project_root: Path
+    workspace: Path
+    affected_relative_files: Annotated[tuple[Path, ...], Field(min_length=1)]
+    change_set: PcbLayoutChangeSet
+    snapshot: Path | None = None
+
+    @field_validator("affected_relative_files")
+    @classmethod
+    def relative_layout_files(cls, value: tuple[Path, ...]) -> tuple[Path, ...]:
+        if any(path.is_absolute() or ".." in path.parts for path in value):
+            raise ValueError("affected layout files must be project-relative")
+        return value
 
 
 class BomLine(FrozenModel):

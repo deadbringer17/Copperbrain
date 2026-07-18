@@ -1029,6 +1029,334 @@ def bldc_driver_bench_rule_requirements() -> tuple[NetRuleRequirement, ...]:
     )
 
 
+def twelve_to_forty_eight_boost_operations() -> tuple[ChangeOperation, ...]:
+    """Build a bounded 9--15 V to 48 V / 0.5 A LT3757A boost benchmark."""
+    components = (
+        (
+            "J1",
+            "Connector_Generic:Conn_01x02",
+            "9-15V_IN",
+            35,
+            70,
+            "TerminalBlock:TerminalBlock_MaiXu_MX126-5.0-02P_1x02_P5.00mm",
+        ),
+        ("F1", "Device:Fuse", "7.5A INPUT", 55, 65, "Fuse:Fuse_1812_4532Metric"),
+        ("D2", "Device:D_TVS", "SMBJ18A", 90, 100, "Diode_SMD:D_SMB"),
+        ("C1", "Device:C_Polarized", "100uF 25V LOW ESR", 82, 85, "Capacitor_SMD:CP_Elec_8x10"),
+        ("C2", "Device:C", "10uF 25V X7R", 94, 85, "Capacitor_SMD:C_1210_3225Metric"),
+        ("C3", "Device:C", "100nF 50V X7R", 140, 85, "Capacitor_SMD:C_0805_2012Metric"),
+        ("L1", "Device:L", "33uH Isat>=5A", 115, 60, "Inductor_SMD:L_Coilcraft_MSS1260-XXX"),
+        (
+            "U1",
+            "Regulator_Switching:LT3757AEMSE",
+            "LT3757AEMSE#PBF",
+            145,
+            170,
+            "Package_SO:MSOP-10-1EP_3x3mm_P0.5mm_EP1.68x1.88mm",
+        ),
+        ("C4", "Device:C", "4.7uF 10V X7R", 130, 125, "Capacitor_SMD:C_0805_2012Metric"),
+        ("R1", "Device:R", "127k 1% UVLO", 115, 105, "Resistor_SMD:R_0805_2012Metric"),
+        ("R2", "Device:R", "20k 1% UVLO", 90, 170, "Resistor_SMD:R_0805_2012Metric"),
+        ("C5", "Device:C", "100nF SOFT START", 180, 135, "Capacitor_SMD:C_0603_1608Metric"),
+        ("R3", "Device:R", "63.4k 1% 200kHz", 160, 135, "Resistor_SMD:R_0603_1608Metric"),
+        ("R4", "Device:R", "22k COMP TUNE", 175, 125, "Resistor_SMD:R_0603_1608Metric"),
+        ("C6", "Device:C", "6.8nF COMP TUNE", 190, 125, "Capacitor_SMD:C_0603_1608Metric"),
+        ("RG1", "Device:R", "10R GATE", 240, 130, "Resistor_SMD:R_0603_1608Metric"),
+        (
+            "Q1",
+            "Transistor_FET:Q_NMOS_GDS",
+            "IPD50N15S4-10 150V",
+            195,
+            80,
+            "Package_TO_SOT_SMD:TO-252-3_TabPin2",
+        ),
+        (
+            "RS1",
+            "Device:R_Shunt",
+            "25mR 2W 1%",
+            195,
+            140,
+            "Resistor_SMD:R_Shunt_Vishay_WSK2512_6332Metric_T2.21mm",
+        ),
+        ("R5", "Device:R", "22R SENSE FILTER", 210, 110, "Resistor_SMD:R_0603_1608Metric"),
+        ("C7", "Device:C", "2.2nF SENSE FILTER", 220, 155, "Capacitor_SMD:C_0603_1608Metric"),
+        (
+            "D1",
+            "Device:D_Schottky",
+            "STPS5H100 100V 5A",
+            215,
+            60,
+            "Package_TO_SOT_SMD:TO-252-3_TabPin2",
+        ),
+        ("C8", "Device:C_Polarized", "47uF 63V LOW ESR", 270, 85, "Capacitor_SMD:CP_Elec_10x10.5"),
+        ("C9", "Device:C_Polarized", "47uF 63V LOW ESR", 300, 85, "Capacitor_SMD:CP_Elec_10x10.5"),
+        ("C10", "Device:C", "2.2uF 100V X7R", 290, 120, "Capacitor_SMD:C_1210_3225Metric"),
+        ("C11", "Device:C", "2.2uF 100V X7R", 330, 120, "Capacitor_SMD:C_1210_3225Metric"),
+        ("R6", "Device:R", "290k 1% FB", 225, 120, "Resistor_SMD:R_0805_2012Metric"),
+        ("R7", "Device:R", "10k 1% FB", 310, 170, "Resistor_SMD:R_0805_2012Metric"),
+        ("F2", "Device:Fuse", "0.75A >=80VDC OUTPUT", 260, 65, "Fuse:Fuse_1206_3216Metric"),
+        ("R8", "Device:R", "100k 0.25W BLEED", 350, 130, "Resistor_SMD:R_1206_3216Metric"),
+        (
+            "J2",
+            "Connector_Generic:Conn_01x02",
+            "48V_OUT_0.5A",
+            380,
+            70,
+            "TerminalBlock:TerminalBlock_MaiXu_MX126-5.0-02P_1x02_P5.00mm",
+        ),
+        (
+            "TP1",
+            "Connector:TestPoint",
+            "VIN_TEST",
+            90,
+            55,
+            "TestPoint:TestPoint_Plated_Hole_D2.0mm",
+        ),
+        (
+            "TP2",
+            "Connector:TestPoint",
+            "SW_TEST",
+            200,
+            55,
+            "TestPoint:TestPoint_Plated_Hole_D2.0mm",
+        ),
+        (
+            "TP3",
+            "Connector:TestPoint",
+            "48V_TEST",
+            330,
+            55,
+            "TestPoint:TestPoint_Plated_Hole_D2.0mm",
+        ),
+        (
+            "TP4",
+            "Connector:TestPoint",
+            "GND_TEST",
+            330,
+            220,
+            "TestPoint:TestPoint_Plated_Hole_D2.0mm",
+        ),
+        ("#FLG01", "power:PWR_FLAG", "PWR_FLAG", 20, 20, ""),
+        ("#FLG02", "power:PWR_FLAG", "PWR_FLAG", 20, 230, ""),
+    )
+    operations: list[ChangeOperation] = [
+        ChangeOperation(kind="set_paper_size", target="schematic", parameters={"paper": "A3"}),
+        *(_component_operation(*component) for component in components),
+    ]
+    nets: dict[str, tuple[tuple[str, str], ...]] = {
+        "VIN_RAW": (("J1", "1"), ("F1", "1")),
+        "VIN_PROTECTED": (
+            ("F1", "2"),
+            ("D2", "1"),
+            ("C1", "1"),
+            ("C2", "1"),
+            ("C3", "1"),
+            ("L1", "1"),
+            ("U1", "10"),
+            ("R1", "1"),
+            ("TP1", "1"),
+            ("#FLG01", "1"),
+        ),
+        "GND": (
+            ("J1", "2"),
+            ("D2", "2"),
+            ("C1", "2"),
+            ("C2", "2"),
+            ("C3", "2"),
+            ("U1", "5"),
+            ("U1", "11"),
+            ("C4", "2"),
+            ("R2", "2"),
+            ("C5", "2"),
+            ("R3", "2"),
+            ("C6", "2"),
+            ("RS1", "2"),
+            ("C7", "2"),
+            ("C8", "2"),
+            ("C9", "2"),
+            ("C10", "2"),
+            ("C11", "2"),
+            ("R7", "2"),
+            ("R8", "2"),
+            ("J2", "2"),
+            ("TP4", "1"),
+            ("RS1", "4"),
+            ("#FLG02", "1"),
+        ),
+        "UVLO_9V": (("R1", "2"), ("R2", "1"), ("U1", "9")),
+        "INTVCC": (("U1", "8"), ("C4", "1")),
+        "SOFT_START": (("U1", "3"), ("C5", "1")),
+        "RT_200KHZ": (("U1", "4"), ("R3", "1")),
+        "VC": (("U1", "1"), ("R4", "1")),
+        "COMP_RC": (("R4", "2"), ("C6", "1")),
+        "GATE": (("U1", "7"), ("RG1", "1")),
+        "GATE_Q": (("RG1", "2"), ("Q1", "1")),
+        "SW": (("L1", "2"), ("Q1", "2"), ("D1", "2"), ("TP2", "1")),
+        "SENSE_RAW": (("Q1", "3"), ("RS1", "1"), ("RS1", "3"), ("R5", "1")),
+        "SENSE_FILTERED": (("R5", "2"), ("C7", "1"), ("U1", "6")),
+        "VOUT_PRE_FUSE": (
+            ("D1", "1"),
+            ("C8", "1"),
+            ("C9", "1"),
+            ("C10", "1"),
+            ("C11", "1"),
+            ("R6", "1"),
+            ("F2", "1"),
+            ("TP3", "1"),
+        ),
+        "FB_1V6": (("R6", "2"), ("R7", "1"), ("U1", "2")),
+        "VOUT48": (("F2", "2"), ("R8", "1"), ("J2", "1")),
+    }
+    for net, pins in nets.items():
+        for reference, pin in pins:
+            operations.extend(
+                (
+                    _net_label(net, reference, pin),
+                    ChangeOperation(
+                        kind="relayout_pin_label",
+                        target=f"{net}:{reference}.{pin}",
+                        parameters={
+                            "text": net,
+                            "reference": reference,
+                            "pin": pin,
+                            "stub_length_mm": 10.16,
+                        },
+                    ),
+                )
+            )
+    metadata = {
+        "U1": {
+            "MPN": "LT3757AEMSE#PBF",
+            "Manufacturer": "Analog Devices",
+            "Datasheet": "https://www.analog.com/media/en/technical-documentation/data-sheets/lt3757-3757a.pdf",
+            "DesignNote": (
+                "PROVISIONAL: non-isolated 9-15V to 48V/0.5A boost, 200kHz; "
+                "compensation and thermal performance require bench validation"
+            ),
+        },
+        "L1": {"DesignNote": "33uH, Isat >=5A, low DCR; verify core loss at 200kHz"},
+        "Q1": {"DesignNote": "150V N-MOSFET; validate gate charge, switching loss and snubber"},
+        "F2": {"DesignNote": "Boost path is not inherently short-circuit protected"},
+    }
+    for reference, properties in metadata.items():
+        operations.extend(
+            ChangeOperation(
+                kind="update_property",
+                target=reference,
+                parameters={"name": name, "value": value, "hidden": True},
+            )
+            for name, value in properties.items()
+        )
+    return tuple(operations)
+
+
+def twelve_to_forty_eight_boost_layout_plan() -> PcbLayoutPlan:
+    """Place the bounded boost benchmark on a 90 x 60 mm two-layer board."""
+    positions: dict[str, tuple[float, float, float, Literal["F.Cu", "B.Cu"]]] = {
+        "J1": (28, 45, 90, "F.Cu"),
+        "F1": (37, 42, 0, "F.Cu"),
+        "D2": (42, 62, 90, "F.Cu"),
+        "C1": (52, 70, 0, "F.Cu"),
+        "C2": (62, 68, 90, "F.Cu"),
+        "C3": (52, 35, 90, "F.Cu"),
+        "L1": (62, 40, 0, "F.Cu"),
+        "U1": (58, 53, 0, "F.Cu"),
+        "C4": (54, 55, 0, "B.Cu"),
+        "R1": (50, 57, 0, "B.Cu"),
+        "R2": (55, 57, 0, "B.Cu"),
+        "C5": (61, 58, 0, "B.Cu"),
+        "R3": (66, 58, 0, "B.Cu"),
+        "R4": (69, 53, 0, "B.Cu"),
+        "C6": (73, 53, 0, "B.Cu"),
+        "RG1": (64, 58, 0, "F.Cu"),
+        "Q1": (70, 52, 0, "F.Cu"),
+        "RS1": (70, 65, 90, "F.Cu"),
+        "R5": (66, 51, 0, "B.Cu"),
+        "C7": (63, 51, 90, "B.Cu"),
+        "D1": (82, 40, 180, "F.Cu"),
+        "C8": (82, 72, 0, "F.Cu"),
+        "C9": (98, 72, 0, "F.Cu"),
+        "C10": (86, 54, 90, "F.Cu"),
+        "C11": (92, 54, 90, "F.Cu"),
+        # Keep the feedback divider close enough to U1 for the reviewed 25 mm
+        # feedback-net length limit; the 48 V leg routes outward to the output stage.
+        "R6": (70, 58, 0, "B.Cu"),
+        "R7": (74, 58, 0, "B.Cu"),
+        "F2": (100, 40, 0, "F.Cu"),
+        "R8": (96, 82, 90, "B.Cu"),
+        "J2": (103, 52, 90, "F.Cu"),
+        "TP1": (45, 34, 0, "F.Cu"),
+        "TP2": (71, 34, 0, "F.Cu"),
+        "TP3": (92, 34, 0, "F.Cu"),
+        "TP4": (76, 62, 0, "F.Cu"),
+    }
+    return PcbLayoutPlan(
+        outline=RectangularBoardOutline(min_x_mm=20, min_y_mm=25, width_mm=90, height_mm=60),
+        placements=tuple(
+            PlacementOperation(
+                reference=reference, x_mm=x, y_mm=y, rotation_deg=rotation, layer=layer
+            )
+            for reference, (x, y, rotation, layer) in sorted(positions.items())
+        ),
+        mounting_holes=tuple(
+            MountingHoleSpec(reference=f"H{index}", x_mm=x, y_mm=y)
+            for index, (x, y) in enumerate(((24, 29), (106, 29), (24, 81), (106, 81)), start=1)
+        ),
+    )
+
+
+def twelve_to_forty_eight_boost_manufacturing_profile() -> ManufacturingProfile:
+    """Return the provisional two-layer manufacturing assumptions."""
+    return ManufacturingProfile(
+        min_clearance_mm=0.2,
+        min_track_width_mm=0.2,
+        min_via_diameter_mm=0.8,
+        min_via_drill_mm=0.4,
+        copper_thickness_um=35,
+        allowed_temperature_rise_c=20,
+        current_layer="external",
+    )
+
+
+def twelve_to_forty_eight_boost_rule_requirements() -> tuple[NetRuleRequirement, ...]:
+    """Return explicit boost power, switching, feedback, and high-voltage intent."""
+    return (
+        NetRuleRequirement(
+            name="CB_BOOST_INPUT",
+            nets=("/VIN_RAW", "/VIN_PROTECTED", "/GND"),
+            role="high_current",
+            current_a=5,
+            clearance_mm=0.25,
+        ),
+        NetRuleRequirement(
+            name="CB_BOOST_SWITCH",
+            nets=("/SW", "/SENSE_RAW"),
+            role="switching",
+            current_a=4.3,
+            voltage_v=60,
+            clearance_mm=0.4,
+            track_width_mm=1.5,
+            max_length_mm=20,
+        ),
+        NetRuleRequirement(
+            name="CB_BOOST_48V",
+            nets=("/VOUT_PRE_FUSE", "/VOUT48"),
+            role="high_voltage",
+            current_a=0.75,
+            voltage_v=48,
+            clearance_mm=0.5,
+            track_width_mm=0.8,
+        ),
+        NetRuleRequirement(
+            name="CB_BOOST_FEEDBACK",
+            nets=("/FB_1V6", "/VC", "/COMP_RC", "/SENSE_FILTERED"),
+            role="signal",
+            track_width_mm=0.2,
+            max_length_mm=25,
+        ),
+    )
+
+
 def five_volt_buck_operations(candidate: ComponentCandidate) -> tuple[ChangeOperation, ...]:
     """Build a reviewable LM2596-class reference section from validated semantic operations."""
     required = "LM2596"

@@ -94,6 +94,19 @@ def test_grounding_plan_targets_every_gnd_pad_after_placement(
     assert domain.planes_connected
 
 
+def test_single_explicit_ground_domain_keeps_layers_domain_scoped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, session = setup(tmp_path, monkeypatch)
+    plan = service.plan(
+        session,
+        GroundingRequest(domains=(GroundDomainRequest(net_name="GND", layers=("F.Cu",)),)),
+    )
+    assert plan.request.layers == ()
+    assert plan.request.domains[0].layers == ("F.Cu",)
+    assert plan.domains[0].primary_layer == "F.Cu"
+
+
 def test_grounding_auto_policy_uses_first_inner_layer_on_four_layer_board(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -142,6 +155,41 @@ def test_grounding_prepare_apply_and_byte_exact_rollback(
         is ChangeStatus.ROLLED_BACK
     )
     assert pcb.read_bytes() == original
+
+
+def test_grounding_can_apply_and_rollback_after_service_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, pcb, session = setup(tmp_path, monkeypatch)
+    original = pcb.read_bytes()
+    change = service.prepare(session, GroundingRequest())
+
+    restarted = restart_service(tmp_path, pcb.parent)
+    applied = restarted.apply(change.id, confirmed=True, editor_closed=True)
+    assert applied.status is ChangeStatus.APPLIED
+    assert pcb.read_bytes() != original
+
+    restarted_again = restart_service(tmp_path, pcb.parent)
+    rolled_back = restarted_again.rollback(change.id, confirmed=True, editor_closed=True)
+    assert rolled_back.status is ChangeStatus.ROLLED_BACK
+    assert pcb.read_bytes() == original
+
+
+def restart_service(tmp_path: Path, root: Path) -> PcbGroundingService:
+    projects = ProjectService()
+    projects.open_project(root)
+    design = PcbDesignService(
+        projects,
+        tmp_path / "data",
+        drc_runner=lambda path: DrcReport(available=True),
+    )
+    return PcbGroundingService(
+        projects,
+        design,
+        tmp_path / "data",
+        grounding_adapter=FakeGroundingAdapter(),  # type: ignore[arg-type]
+        drc_runner=lambda path: DrcReport(available=True),
+    )
 
 
 def test_grounding_refuses_multiple_domains_without_two_terminal_bridge(

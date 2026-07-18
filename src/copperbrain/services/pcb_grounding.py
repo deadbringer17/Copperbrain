@@ -31,6 +31,7 @@ from copperbrain.models import (
     GroundingRequest,
     GroundZoneRegion,
     PcbBounds,
+    PcbGroundingChangeRecord,
     PcbGroundingChangeSet,
     PcbPadInspection,
     ProjectSession,
@@ -186,6 +187,73 @@ class PcbGroundingService:
             lambda pcb, destination: export_pcb_pdf(detect_kicad().selected_cli, pcb, destination)
         )
         self._changes: dict[str, _PreparedGrounding] = {}
+
+    @property
+    def _records_dir(self) -> Path:
+        return self.data_dir / "pcb-grounding-changes"
+
+    def _record_path(self, change_set_id: str) -> Path:
+        if len(change_set_id) != 32 or any(
+            character not in "0123456789abcdef" for character in change_set_id
+        ):
+            raise CopperbrainError(ErrorCode.INVALID_INPUT, "Grounding identifier is invalid")
+        return self._records_dir / f"{change_set_id}.json"
+
+    def _persist(self, prepared: _PreparedGrounding, project_root: Path) -> None:
+        root = project_root.resolve()
+        record = PcbGroundingChangeRecord(
+            project_root=root,
+            workspace=prepared.workspace.resolve(),
+            affected_relative_files=tuple(
+                path.resolve().relative_to(root) for path in prepared.change_set.affected_files
+            ),
+            change_set=prepared.change_set,
+            snapshot=prepared.snapshot.resolve() if prepared.snapshot is not None else None,
+        )
+        path = self._record_path(prepared.change_set.id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+                stream.write(record.model_dump_json(indent=2))
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+    def _load(self, change_set_id: str) -> _PreparedGrounding:
+        try:
+            record = PcbGroundingChangeRecord.model_validate_json(
+                self._record_path(change_set_id).read_text(encoding="utf-8")
+            )
+        except FileNotFoundError as exc:
+            raise CopperbrainError(
+                ErrorCode.NOT_FOUND, "Grounding change set was not found"
+            ) from exc
+        except (OSError, ValueError) as exc:
+            raise CopperbrainError(
+                ErrorCode.VALIDATION_FAILED,
+                "Persisted grounding change set is invalid",
+                details={"reason": str(exc)},
+            ) from exc
+        workspace = record.workspace.resolve()
+        private_root = (self.data_dir / "workspaces").resolve()
+        if not workspace.is_relative_to(private_root) or not workspace.is_dir():
+            raise CopperbrainError(ErrorCode.CONFLICT, "Grounding workspace is unavailable")
+        session = self.projects.open_project(record.project_root)
+        affected = tuple(session.root / path for path in record.affected_relative_files)
+        prepared = _PreparedGrounding(
+            change_set=record.change_set.model_copy(
+                update={"session_id": session.id, "affected_files": affected}
+            ),
+            workspace=workspace,
+            snapshot=record.snapshot.resolve() if record.snapshot is not None else None,
+        )
+        self._changes[change_set_id] = prepared
+        return prepared
 
     def _session_pcb(self, session_id: str) -> tuple[ProjectSession, Path]:
         session = self.projects.get_session(session_id)
@@ -856,7 +924,22 @@ class PcbGroundingService:
                 )
             )
         if len(target_nets) == 1:
-            request = request.model_copy(update={"layers": domain_layers[target_nets[0]]})
+            target_net = target_nets[0]
+            if request.domains:
+                request = request.model_copy(
+                    update={
+                        "domains": (
+                            GroundDomainRequest(
+                                net_name=target_net,
+                                layers=domain_layers[target_net],
+                                pad_connection=domain_plans[0].pad_connection,
+                            ),
+                        ),
+                        "layers": (),
+                    }
+                )
+            else:
+                request = request.model_copy(update={"layers": domain_layers[target_net]})
         else:
             request = request.model_copy(
                 update={
@@ -1130,16 +1213,16 @@ class PcbGroundingService:
             preview_pdf=preview_pdf,
             status=status,
         )
-        self._changes[identifier] = _PreparedGrounding(change_set, workspace)
+        prepared = _PreparedGrounding(change_set, workspace)
+        self._changes[identifier] = prepared
+        self._persist(prepared, session.root)
         return change_set
 
     def _get(self, change_set_id: str) -> _PreparedGrounding:
         try:
             return self._changes[change_set_id]
-        except KeyError as exc:
-            raise CopperbrainError(
-                ErrorCode.NOT_FOUND, "Grounding change set was not found"
-            ) from exc
+        except KeyError:
+            return self._load(change_set_id)
 
     def validate(self, change_set_id: str) -> tuple[ValidationReport, DrcReport, GroundingAnalysis]:
         prepared = self._get(change_set_id)
@@ -1167,6 +1250,7 @@ class PcbGroundingService:
             )
         if self._current_hashes(session) != change_set.source_hashes:
             prepared.change_set = change_set.model_copy(update={"status": ChangeStatus.STALE})
+            self._persist(prepared, session.root)
             raise CopperbrainError(ErrorCode.CONFLICT, "Grounding change set is stale")
         snapshot_id = uuid.uuid4().hex
         snapshot = self.data_dir / "snapshots" / snapshot_id
@@ -1189,6 +1273,7 @@ class PcbGroundingService:
         prepared.change_set = change_set.model_copy(
             update={"status": ChangeStatus.APPLIED, "snapshot_id": snapshot_id}
         )
+        self._persist(prepared, session.root)
         return prepared.change_set
 
     def rollback(
@@ -1214,4 +1299,5 @@ class PcbGroundingService:
         prepared.change_set = prepared.change_set.model_copy(
             update={"status": ChangeStatus.ROLLED_BACK}
         )
+        self._persist(prepared, session.root)
         return prepared.change_set

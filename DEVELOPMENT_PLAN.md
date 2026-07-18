@@ -797,3 +797,44 @@ gate di readiness.
   ripartizionamento o routing dedicato; non sono state forzate dopo ripetuta stagnazione.
 - [ ] Termica/SOA, PI, EMC, stackup, DFM, via-in-pad, creepage e selezione definitiva dei componenti
   devono essere approvati prima di qualsiasi `production_ready=true`.
+
+## 22. Estensione approvata — benchmark boost 12 V a 48 V
+
+La richiesta del 17 luglio 2026 approva il reference design deterministico `benchmark-test3` per
+un convertitore boost non isolato con ingresso provvisorio 9--15 V, uscita 48 V / 0,5 A e PCB a
+due layer. Il circuito usa un LT3757A con MOSFET esterno, diodo, induttore e shunt dimensionati
+tramite operazioni tipizzate; non abilita la generazione autonoma illimitata di alimentatori.
+
+- Frequenza iniziale 200 kHz, induttore 33 uH con Isat almeno 5 A e limite di picco impostato da
+  shunt 25 mOhm; compensazione, perdite, snubber e risposta transitoria restano da verificare al
+  banco.
+- Fusibili di ingresso e uscita, TVS, soft-start, UVLO e test point sono inclusi, ma la topologia
+  boost non garantisce protezione intrinseca dal cortocircuito dell'uscita.
+- Le reti di ingresso, switching, feedback e 48 V hanno ruoli e regole espliciti; massa e potenza
+  sono trattate prima del routing generico.
+- Baseline, prepare, validate, apply, grounding e routing devono produrre record metrici schema 4
+  correlati. Ogni mutazione resta `prepare -> preview -> conferma -> validate -> apply`.
+- EMC, stabilita di anello, termica/SOA, derating a 48 V, sicurezza al contatto, DFM e validazione
+  su hardware restano obbligatorie prima di qualsiasi dichiarazione di production readiness.
+
+## 23. Contratto approvato — tre sole accettazioni MCP
+
+La richiesta del 17 luglio 2026 riduce la superficie pubblica di consenso a tre categorie. I tool
+granulari di analisi, prepare, preview e validate restano disponibili, ma i relativi apply e
+rollback non sono piu registrati come tool MCP. Rimangono interni ai servizi per comporre e
+verificare copie private.
+
+| Accettazione pubblica | Ambito atomico |
+|---|---|
+| `accept_schematic` | scaffold iniziale oppure change set schematico validato |
+| `accept_design_rules` | netclass, larghezze, clearance, vias e assegnazioni validate |
+| `accept_pcb` | placement opzionale, grounding e tutti i batch di routing revisionati |
+
+- `prepare_pcb_acceptance` costruisce placement, grounding e routing in un solo workspace privato,
+  pubblica una sola preview e conserva gli ID metrici dei batch di routing.
+- `validate_pcb_acceptance` ripete i controlli strutturali, di connettivita e DRC prima
+  dell'accettazione PCB; `accept_pcb` esegue una sola sostituzione atomica del PCB live.
+- `rollback_accepted_phase` e un comando esplicito di recovery e non introduce una quarta
+  accettazione; ripristina lo snapshot della fase selezionata.
+- Conferme implicite o permanenti restano vietate: ogni accettazione identifica un change set
+  concreto, con hash sorgente, preview, validazione, editor state, snapshot e rollback.

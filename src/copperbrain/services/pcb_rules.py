@@ -36,6 +36,7 @@ from copperbrain.models import (
     NetConstraintCandidate,
     NetRuleRequirement,
     PcbConstraintAnalysis,
+    PcbRuleChangeRecord,
     PcbRuleChangeSet,
     PcbRuleSet,
     ProjectSession,
@@ -142,6 +143,74 @@ class PcbRuleService:
             lambda footprint: validate_footprint(detect_kicad().selected_cli, footprint)
         )
         self._changes: dict[str, _PreparedPcbRules] = {}
+
+    @property
+    def _records_dir(self) -> Path:
+        return self.data_dir / "pcb-rule-changes"
+
+    def _record_path(self, change_set_id: str) -> Path:
+        if re.fullmatch(r"[0-9a-f]{32}", change_set_id) is None:
+            raise CopperbrainError(ErrorCode.INVALID_INPUT, "PCB rule identifier is invalid")
+        return self._records_dir / f"{change_set_id}.json"
+
+    def _persist(self, prepared: _PreparedPcbRules, project_root: Path) -> None:
+        root = project_root.resolve()
+        record = PcbRuleChangeRecord(
+            project_root=root,
+            workspace=prepared.workspace.resolve(),
+            affected_relative_files=tuple(
+                path.resolve().relative_to(root) for path in prepared.change_set.affected_files
+            ),
+            originally_existing=prepared.originally_existing,
+            change_set=prepared.change_set,
+            snapshot=prepared.snapshot.resolve() if prepared.snapshot is not None else None,
+        )
+        path = self._record_path(prepared.change_set.id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+                stream.write(record.model_dump_json(indent=2))
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+    def _load(self, change_set_id: str) -> _PreparedPcbRules:
+        try:
+            record = PcbRuleChangeRecord.model_validate_json(
+                self._record_path(change_set_id).read_text(encoding="utf-8")
+            )
+        except FileNotFoundError as exc:
+            raise CopperbrainError(
+                ErrorCode.NOT_FOUND, "PCB rule change set was not found"
+            ) from exc
+        except (OSError, ValueError) as exc:
+            raise CopperbrainError(
+                ErrorCode.VALIDATION_FAILED,
+                "Persisted PCB rule change set is invalid",
+                details={"reason": str(exc)},
+            ) from exc
+        workspace = record.workspace.resolve()
+        private_root = (self.data_dir / "workspaces").resolve()
+        if not workspace.is_relative_to(private_root) or not workspace.is_dir():
+            raise CopperbrainError(ErrorCode.CONFLICT, "PCB rule workspace is unavailable")
+        session = self.projects.open_project(record.project_root)
+        affected = tuple(session.root / path for path in record.affected_relative_files)
+        snapshot = record.snapshot.resolve() if record.snapshot is not None else None
+        prepared = _PreparedPcbRules(
+            change_set=record.change_set.model_copy(
+                update={"session_id": session.id, "affected_files": affected}
+            ),
+            workspace=workspace,
+            originally_existing=record.originally_existing,
+            snapshot=snapshot,
+        )
+        self._changes[change_set_id] = prepared
+        return prepared
 
     @staticmethod
     def _rule_path(session: ProjectSession) -> Path:
@@ -350,11 +419,7 @@ class PcbRuleService:
                     if reference == component.reference
                 },
             )
-            if (
-                geometry is None
-                or footprint_candidate.safe_fanout_width_mm is None
-                or footprint_candidate.safe_clearance_mm is None
-            ):
+            if geometry is None or footprint_candidate.safe_fanout_width_mm is None:
                 if (
                     required_width > profile.min_track_width_mm
                     or required_clearance > profile.min_clearance_mm
@@ -372,7 +437,10 @@ class PcbRuleService:
                     )
                 continue
             safe_width = footprint_candidate.safe_fanout_width_mm
-            safe_clearance = footprint_candidate.safe_clearance_mm
+            # A one-net footprint (for example a plated test point) has no unlike-net
+            # pad pair from which to calculate a local clearance. In that case the
+            # reviewed netclass clearance remains the applicable safe value.
+            safe_clearance = footprint_candidate.safe_clearance_mm or required_clearance
             if required_width <= safe_width and required_clearance <= safe_clearance:
                 continue
             if safe_width < profile.min_track_width_mm:
@@ -616,20 +684,20 @@ class PcbRuleService:
         originally_existing = frozenset(
             str(path.relative_to(session.root)) for path in affected if path.is_file()
         )
-        self._changes[identifier] = _PreparedPcbRules(
+        prepared = _PreparedPcbRules(
             change_set=change_set,
             workspace=workspace,
             originally_existing=originally_existing,
         )
+        self._changes[identifier] = prepared
+        self._persist(prepared, session.root)
         return change_set
 
     def _get(self, change_set_id: str) -> _PreparedPcbRules:
         try:
             return self._changes[change_set_id]
-        except KeyError as exc:
-            raise CopperbrainError(
-                ErrorCode.NOT_FOUND, "PCB rule change set was not found"
-            ) from exc
+        except KeyError:
+            return self._load(change_set_id)
 
     def validate(self, change_set_id: str) -> tuple[ValidationReport, DrcReport]:
         prepared = self._get(change_set_id)
@@ -672,11 +740,13 @@ class PcbRuleService:
         }
         if current != change_set.source_hashes:
             prepared.change_set = change_set.model_copy(update={"status": ChangeStatus.STALE})
+            self._persist(prepared, session.root)
             raise CopperbrainError(ErrorCode.CONFLICT, "PCB rule change is stale")
         for affected in change_set.affected_files:
             relative_name = str(affected.relative_to(session.root))
             if affected.is_file() != (relative_name in prepared.originally_existing):
                 prepared.change_set = change_set.model_copy(update={"status": ChangeStatus.STALE})
+                self._persist(prepared, session.root)
                 raise CopperbrainError(
                     ErrorCode.CONFLICT, "An affected PCB rule file appeared or disappeared"
                 )
@@ -708,6 +778,7 @@ class PcbRuleService:
         prepared.change_set = change_set.model_copy(
             update={"status": ChangeStatus.APPLIED, "snapshot_id": snapshot_id}
         )
+        self._persist(prepared, session.root)
         return prepared.change_set
 
     def rollback(
@@ -739,4 +810,5 @@ class PcbRuleService:
         prepared.change_set = prepared.change_set.model_copy(
             update={"status": ChangeStatus.ROLLED_BACK}
         )
+        self._persist(prepared, session.root)
         return prepared.change_set

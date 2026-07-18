@@ -25,6 +25,7 @@ from copperbrain.models import (
     ManufacturingProfile,
     NetRuleRequirement,
     PcbLayoutPlan,
+    PcbPhaseRequest,
     PcbRuleSet,
     PlacementOperation,
     PlacementRequest,
@@ -43,6 +44,7 @@ from copperbrain.services.pcb_design import PcbDesignService
 from copperbrain.services.pcb_finalization import PcbFinalizationService
 from copperbrain.services.pcb_grounding import PcbGroundingService
 from copperbrain.services.pcb_layout import PcbLayoutService
+from copperbrain.services.pcb_phase import PcbPhaseService
 from copperbrain.services.pcb_routing import PcbRoutingService
 from copperbrain.services.pcb_rules import PcbRuleService
 from copperbrain.services.project_creation import ProjectCreationService
@@ -80,6 +82,7 @@ pcb_grounding = PcbGroundingService(projects, pcb_design, settings.data_dir)
 pcb_layout = PcbLayoutService(projects, settings.data_dir)
 pcb_routing = PcbRoutingService(projects, settings.data_dir, routing_backend=routing_backend)
 pcb_finalization = PcbFinalizationService(projects, pcb_design, pcb_routing)
+pcb_phase = PcbPhaseService(projects, settings.data_dir, routing_backend)
 downloads = DownloadAdapter(
     settings.allowed_download_hosts,
     timeout=settings.connect_timeout_seconds + settings.read_timeout_seconds,
@@ -110,6 +113,105 @@ def _resolve_asset(value: str, kind: str) -> Path:
 
 
 @mcp.tool()
+def accept_schematic(
+    change_set_id: str,
+    change_kind: str,
+    confirmed: bool,
+    editor_closed: bool = True,
+) -> dict[str, object]:
+    """First and only schematic-phase acceptance, including optional project creation."""
+    if change_kind == "project_creation":
+        return project_creation.apply(change_set_id, confirmed=confirmed).model_dump(mode="json")
+    if change_kind == "schematic":
+        return changes.apply(
+            change_set_id,
+            confirmed=confirmed,
+            editor_closed=editor_closed,
+        ).model_dump(mode="json")
+    raise CopperbrainError(
+        ErrorCode.INVALID_INPUT,
+        "Schematic acceptance kind must be project_creation or schematic",
+    )
+
+
+@mcp.tool()
+def accept_design_rules(
+    change_set_id: str,
+    confirmed: bool,
+    editor_closed: bool,
+) -> dict[str, object]:
+    """Second and only design-rule acceptance for widths, clearances, vias, and assignments."""
+    return pcb_rules.apply(
+        change_set_id,
+        confirmed=confirmed,
+        editor_closed=editor_closed,
+    ).model_dump(mode="json")
+
+
+@mcp.tool()
+def prepare_pcb_acceptance(
+    session_id: str,
+    request: dict[str, object],
+) -> dict[str, object]:
+    """Compose placement, grounding, and reviewed routing batches into one PCB preview."""
+    normalized = PcbPhaseRequest.model_validate(request)
+    return pcb_phase.prepare(session_id, normalized).model_dump(mode="json")
+
+
+@mcp.tool()
+def validate_pcb_acceptance(change_set_id: str) -> dict[str, object]:
+    """Revalidate the complete aggregate PCB workspace before its single acceptance."""
+    return pcb_phase.validate(change_set_id).model_dump(mode="json")
+
+
+@mcp.tool()
+def accept_pcb(
+    change_set_id: str,
+    confirmed: bool,
+    editor_closed: bool,
+) -> dict[str, object]:
+    """Third and final acceptance atomically applies placement, grounding, and routing."""
+    return pcb_phase.apply(
+        change_set_id,
+        confirmed=confirmed,
+        editor_closed=editor_closed,
+    ).model_dump(mode="json")
+
+
+@mcp.tool()
+def rollback_accepted_phase(
+    phase: str,
+    change_set_id: str,
+    editor_closed: bool = True,
+) -> dict[str, object]:
+    """Explicit recovery command; invoking it is the rollback confirmation, not a fourth gate."""
+    if phase == "project_creation":
+        return project_creation.rollback(change_set_id, confirmed=True).model_dump(mode="json")
+    if phase == "schematic":
+        return changes.rollback(
+            change_set_id,
+            confirmed=True,
+            editor_closed=editor_closed,
+        ).model_dump(mode="json")
+    if phase == "design_rules":
+        return pcb_rules.rollback(
+            change_set_id,
+            confirmed=True,
+            editor_closed=editor_closed,
+        ).model_dump(mode="json")
+    if phase == "pcb":
+        return pcb_phase.rollback(
+            change_set_id,
+            confirmed=True,
+            editor_closed=editor_closed,
+        ).model_dump(mode="json")
+    raise CopperbrainError(
+        ErrorCode.INVALID_INPUT,
+        "Rollback phase must be project_creation, schematic, design_rules, or pcb",
+    )
+
+
+@mcp.tool()
 def detect_kicad() -> dict[str, object]:
     """Detect KiCad versions, CLI paths, user data directories, and JLC plugins."""
     return detect_kicad_service().model_dump(mode="json")
@@ -128,13 +230,11 @@ def validate_project_creation(change_set_id: str) -> dict[str, object]:
     return project_creation.validate(change_set_id).model_dump(mode="json")
 
 
-@mcp.tool()
 def apply_project_creation(change_set_id: str, confirmed: bool) -> dict[str, object]:
     """Atomically create project source files after explicit confirmation."""
     return project_creation.apply(change_set_id, confirmed=confirmed).model_dump(mode="json")
 
 
-@mcp.tool()
 def rollback_project_creation(change_set_id: str, confirmed: bool) -> dict[str, object]:
     """Remove unchanged source files created by a confirmed project change set."""
     return project_creation.rollback(change_set_id, confirmed=confirmed).model_dump(mode="json")
@@ -216,7 +316,6 @@ def validate_pcb_rule_change(change_set_id: str) -> dict[str, object]:
     }
 
 
-@mcp.tool()
 def apply_pcb_rule_change(
     change_set_id: str,
     confirmed: bool,
@@ -228,7 +327,6 @@ def apply_pcb_rule_change(
     ).model_dump(mode="json")
 
 
-@mcp.tool()
 def rollback_pcb_rule_change(
     change_set_id: str,
     confirmed: bool,
@@ -290,7 +388,6 @@ def validate_placement_change(change_set_id: str) -> dict[str, object]:
     }
 
 
-@mcp.tool()
 def apply_placement_change(
     change_set_id: str, confirmed: bool, editor_closed: bool
 ) -> dict[str, object]:
@@ -300,7 +397,6 @@ def apply_placement_change(
     ).model_dump(mode="json")
 
 
-@mcp.tool()
 def rollback_placement_change(
     change_set_id: str, confirmed: bool, editor_closed: bool
 ) -> dict[str, object]:
@@ -328,7 +424,6 @@ def validate_grounding_pcb(change_set_id: str) -> dict[str, object]:
     }
 
 
-@mcp.tool()
 def apply_grounding_pcb(
     change_set_id: str, confirmed: bool, editor_closed: bool
 ) -> dict[str, object]:
@@ -338,7 +433,6 @@ def apply_grounding_pcb(
     ).model_dump(mode="json")
 
 
-@mcp.tool()
 def rollback_grounding_pcb(
     change_set_id: str, confirmed: bool, editor_closed: bool
 ) -> dict[str, object]:
@@ -397,7 +491,6 @@ def validate_routing_change(change_set_id: str) -> dict[str, object]:
     }
 
 
-@mcp.tool()
 def apply_routing_change(
     change_set_id: str, confirmed: bool, editor_closed: bool
 ) -> dict[str, object]:
@@ -407,7 +500,6 @@ def apply_routing_change(
     ).model_dump(mode="json")
 
 
-@mcp.tool()
 def rollback_routing_change(
     change_set_id: str, confirmed: bool, editor_closed: bool
 ) -> dict[str, object]:
@@ -417,7 +509,6 @@ def rollback_routing_change(
     ).model_dump(mode="json")
 
 
-@mcp.tool()
 def restore_routing_snapshot(
     session_id: str,
     snapshot_id: str,
@@ -460,7 +551,6 @@ def validate_pcb_finalization(change_set_id: str) -> dict[str, object]:
     return pcb_finalization.validate(change_set_id).model_dump(mode="json")
 
 
-@mcp.tool()
 def apply_pcb_finalization(
     change_set_id: str,
     confirmed: bool,
@@ -497,7 +587,6 @@ def validate_pcb_layout_change(change_set_id: str) -> dict[str, object]:
     }
 
 
-@mcp.tool()
 def apply_pcb_layout_change(
     change_set_id: str, confirmed: bool, editor_closed: bool
 ) -> dict[str, object]:
@@ -507,7 +596,6 @@ def apply_pcb_layout_change(
     ).model_dump(mode="json")
 
 
-@mcp.tool()
 def rollback_pcb_layout_change(
     change_set_id: str, confirmed: bool, editor_closed: bool
 ) -> dict[str, object]:
@@ -612,7 +700,6 @@ def validate_change(change_set_id: str) -> dict[str, object]:
     return changes.validate(change_set_id).model_dump(mode="json")
 
 
-@mcp.tool()
 def apply_change(
     change_set_id: str,
     confirmed: bool,
@@ -624,7 +711,6 @@ def apply_change(
     ).model_dump(mode="json")
 
 
-@mcp.tool()
 def rollback_change(
     change_set_id: str,
     confirmed: bool,

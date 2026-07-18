@@ -58,31 +58,31 @@ path and verification result.
 ## Mutation safety
 
 The client must call `prepare_schematic_change`, review its semantic diff, risks and validation,
-then call `apply_change` with both `confirmed=true` and `editor_closed=true`. Copperbrain checks
+then call `accept_schematic` with `confirmed=true` and `editor_closed=true`. Copperbrain checks
 source hashes again, refuses lock files, snapshots affected files and uses atomic replacement.
-Rollback requires a separate explicit confirmation.
+Recovery is an explicit `rollback_accepted_phase` invocation.
 
-PCB placement uses the same safety contract through `prepare_placement_change`,
-`validate_placement_change`, `apply_placement_change`, and `rollback_placement_change`. PDF
+PCB placement evidence uses `prepare_placement_change` and `validate_placement_change`, then feeds
+the operations into `prepare_pcb_acceptance`; no separate placement gate is exposed. PDF
 preview and DRC work without an open editor. For optional live IPC access, enable the API server
 in KiCad preferences and open the intended board in PCB Editor; Copperbrain refuses an IPC board
 whose resolved path does not match the expected temporary workspace file.
 
-Empty-board initialization uses `prepare_pcb_layout_change`, `validate_pcb_layout_change`,
-`apply_pcb_layout_change`, and `rollback_pcb_layout_change`. Its input is a typed complete placement
-plan; it does not accept KiCad syntax or generate routing. The same confirmation, editor-state,
-hash, snapshot, atomic replacement, and rollback requirements apply.
+Empty-board initialization uses `prepare_pcb_layout_change` and `validate_pcb_layout_change`. Its
+input is a typed complete placement plan; it does not accept KiCad syntax or generate routing. The
+reviewed PCB work is applied only through the aggregate PCB acceptance.
 
-Controlled routing uses `get_routing_backend_status`, `analyze_unrouted_nets`, `propose_pcb_routing`,
-`prepare_routing_change`, `validate_routing_change`, `apply_routing_change`, and
-`rollback_routing_change`. FreeRouting works only in private DSN/SES workspaces; Copperbrain
+Controlled routing uses `get_routing_backend_status`, `analyze_unrouted_nets`,
+`propose_pcb_routing`, `prepare_routing_change`, and `validate_routing_change`. The reviewed
+batches and grounding are composed by `prepare_pcb_acceptance`, revalidated, and applied once by
+`accept_pcb`. FreeRouting works only in private DSN/SES workspaces; Copperbrain
 imports its result, refuses changed existing copper, and exposes typed segment/via deltas only.
 KiCad refills zones on both the imported candidate and prepared typed copy before comparative DRC;
 Specctra-only coordinate rounding is matched within 1 um without replacing source-precision copper.
 Prepare works on a private project copy and requires both complete selected-net connectivity and
 comparative KiCad DRC before apply.
-Apply and rollback retain the same explicit confirmation, closed-editor, stale-hash, snapshot,
-and atomic replacement requirements.
+The aggregate apply and recovery retain closed-editor, stale-hash, snapshot, and atomic replacement
+requirements.
 
 Routing change manifests are stored under `COPPERBRAIN_DATA_DIR/routing-changes/`; their private
 workspaces and snapshots allow the lifecycle to resume after an MCP restart. `copperbrain-output/`

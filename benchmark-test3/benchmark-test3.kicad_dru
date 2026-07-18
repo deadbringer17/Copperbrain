@@ -1,0 +1,203 @@
+(version 1)
+
+# BEGIN COPPERBRAIN MANAGED RULES
+# Generated from typed Copperbrain constraints; do not edit here.
+# Copperbrain netclass-role CB_BOOST_INPUT high_current
+(rule "Copperbrain_CB_BOOST_INPUT"
+  (condition "A.hasNetclass('CB_BOOST_INPUT')")
+  (constraint track_width (min 0.2mm) (opt 1.82mm))
+  (constraint via_diameter (min 0.8mm))
+  (constraint hole_size (min 0.4mm))
+)
+(rule "Copperbrain_CB_BOOST_INPUT_clearance"
+  (condition "A.hasNetclass('CB_BOOST_INPUT') && A.Parent != B.Parent")
+  (constraint clearance (min 0.25mm))
+)
+# Copperbrain netclass-role CB_BOOST_SWITCH switching
+(rule "Copperbrain_CB_BOOST_SWITCH"
+  (condition "A.hasNetclass('CB_BOOST_SWITCH')")
+  (constraint track_width (min 0.2mm) (opt 1.5mm))
+  (constraint via_diameter (min 0.8mm))
+  (constraint hole_size (min 0.4mm))
+  (constraint length (max 20mm))
+)
+(rule "Copperbrain_CB_BOOST_SWITCH_clearance"
+  (condition "A.hasNetclass('CB_BOOST_SWITCH') && A.Parent != B.Parent")
+  (constraint clearance (min 0.4mm))
+)
+# Copperbrain netclass-role CB_BOOST_48V high_voltage
+(rule "Copperbrain_CB_BOOST_48V"
+  (condition "A.hasNetclass('CB_BOOST_48V')")
+  (constraint track_width (min 0.2mm) (opt 0.8mm))
+  (constraint via_diameter (min 0.8mm))
+  (constraint hole_size (min 0.4mm))
+)
+(rule "Copperbrain_CB_BOOST_48V_clearance"
+  (condition "A.hasNetclass('CB_BOOST_48V') && A.Parent != B.Parent")
+  (constraint clearance (min 0.5mm))
+)
+# Copperbrain netclass-role CB_BOOST_FEEDBACK signal
+(rule "Copperbrain_CB_BOOST_FEEDBACK"
+  (condition "A.hasNetclass('CB_BOOST_FEEDBACK')")
+  (constraint track_width (min 0.2mm) (opt 0.2mm))
+  (constraint via_diameter (min 0.8mm))
+  (constraint hole_size (min 0.4mm))
+  (constraint length (max 25mm))
+)
+(rule "Copperbrain_CB_BOOST_FEEDBACK_clearance"
+  (condition "A.hasNetclass('CB_BOOST_FEEDBACK') && A.Parent != B.Parent")
+  (constraint clearance (min 0.2mm))
+)
+(rule "Copperbrain_fanout_C10"
+  (condition "A.intersectsCourtyard('C10')")
+  (constraint track_width (min 0.2mm) (opt 0.92mm))
+)
+(rule "Copperbrain_fanout_clearance_C10"
+  (condition "A.intersectsCourtyard('C10') || B.intersectsCourtyard('C10')")
+  (constraint clearance (min 0.2mm))
+)
+(rule "Copperbrain_fanout_C11"
+  (condition "A.intersectsCourtyard('C11')")
+  (constraint track_width (min 0.2mm) (opt 0.92mm))
+)
+(rule "Copperbrain_fanout_clearance_C11"
+  (condition "A.intersectsCourtyard('C11') || B.intersectsCourtyard('C11')")
+  (constraint clearance (min 0.2mm))
+)
+(rule "Copperbrain_fanout_C2"
+  (condition "A.intersectsCourtyard('C2')")
+  (constraint track_width (min 0.2mm) (opt 0.92mm))
+)
+(rule "Copperbrain_fanout_clearance_C2"
+  (condition "A.intersectsCourtyard('C2') || B.intersectsCourtyard('C2')")
+  (constraint clearance (min 0.2mm))
+)
+(rule "Copperbrain_fanout_C3"
+  (condition "A.intersectsCourtyard('C3')")
+  (constraint track_width (min 0.2mm) (opt 0.8mm))
+)
+(rule "Copperbrain_fanout_clearance_C3"
+  (condition "A.intersectsCourtyard('C3') || B.intersectsCourtyard('C3')")
+  (constraint clearance (min 0.2mm))
+)
+(rule "Copperbrain_fanout_C4"
+  (condition "A.intersectsCourtyard('C4')")
+  (constraint track_width (min 0.2mm) (opt 0.8mm))
+)
+(rule "Copperbrain_fanout_clearance_C4"
+  (condition "A.intersectsCourtyard('C4') || B.intersectsCourtyard('C4')")
+  (constraint clearance (min 0.2mm))
+)
+(rule "Copperbrain_fanout_C5"
+  (condition "A.intersectsCourtyard('C5')")
+  (constraint track_width (min 0.2mm) (opt 0.72mm))
+)
+(rule "Copperbrain_fanout_clearance_C5"
+  (condition "A.intersectsCourtyard('C5') || B.intersectsCourtyard('C5')")
+  (constraint clearance (min 0.2mm))
+)
+(rule "Copperbrain_fanout_C6"
+  (condition "A.intersectsCourtyard('C6')")
+  (constraint track_width (min 0.2mm) (opt 0.72mm))
+)
+(rule "Copperbrain_fanout_clearance_C6"
+  (condition "A.intersectsCourtyard('C6') || B.intersectsCourtyard('C6')")
+  (constraint clearance (min 0.2mm))
+)
+(rule "Copperbrain_fanout_C7"
+  (condition "A.intersectsCourtyard('C7')")
+  (constraint track_width (min 0.2mm) (opt 0.72mm))
+)
+(rule "Copperbrain_fanout_clearance_C7"
+  (condition "A.intersectsCourtyard('C7') || B.intersectsCourtyard('C7')")
+  (constraint clearance (min 0.2mm))
+)
+(rule "Copperbrain_fanout_D1"
+  (condition "A.intersectsCourtyard('D1')")
+  (constraint track_width (min 0.2mm) (opt 0.96mm))
+)
+(rule "Copperbrain_fanout_clearance_D1"
+  (condition "A.intersectsCourtyard('D1') || B.intersectsCourtyard('D1')")
+  (constraint clearance (min 0.2mm))
+)
+(rule "Copperbrain_fanout_F1"
+  (condition "A.intersectsCourtyard('F1')")
+  (constraint track_width (min 0.2mm) (opt 0.9mm))
+)
+(rule "Copperbrain_fanout_clearance_F1"
+  (condition "A.intersectsCourtyard('F1') || B.intersectsCourtyard('F1')")
+  (constraint clearance (min 0.2mm))
+)
+(rule "Copperbrain_fanout_Q1"
+  (condition "A.intersectsCourtyard('Q1')")
+  (constraint track_width (min 0.2mm) (opt 0.96mm))
+)
+(rule "Copperbrain_fanout_clearance_Q1"
+  (condition "A.intersectsCourtyard('Q1') || B.intersectsCourtyard('Q1')")
+  (constraint clearance (min 0.2mm))
+)
+(rule "Copperbrain_fanout_R1"
+  (condition "A.intersectsCourtyard('R1')")
+  (constraint track_width (min 0.2mm) (opt 0.82mm))
+)
+(rule "Copperbrain_fanout_clearance_R1"
+  (condition "A.intersectsCourtyard('R1') || B.intersectsCourtyard('R1')")
+  (constraint clearance (min 0.2mm))
+)
+(rule "Copperbrain_fanout_R2"
+  (condition "A.intersectsCourtyard('R2')")
+  (constraint track_width (min 0.2mm) (opt 0.82mm))
+)
+(rule "Copperbrain_fanout_clearance_R2"
+  (condition "A.intersectsCourtyard('R2') || B.intersectsCourtyard('R2')")
+  (constraint clearance (min 0.2mm))
+)
+(rule "Copperbrain_fanout_R3"
+  (condition "A.intersectsCourtyard('R3')")
+  (constraint track_width (min 0.2mm) (opt 0.64mm))
+)
+(rule "Copperbrain_fanout_clearance_R3"
+  (condition "A.intersectsCourtyard('R3') || B.intersectsCourtyard('R3')")
+  (constraint clearance (min 0.2mm))
+)
+(rule "Copperbrain_fanout_R5"
+  (condition "A.intersectsCourtyard('R5')")
+  (constraint track_width (min 0.2mm) (opt 0.64mm))
+)
+(rule "Copperbrain_fanout_clearance_R5"
+  (condition "A.intersectsCourtyard('R5') || B.intersectsCourtyard('R5')")
+  (constraint clearance (min 0.2mm))
+)
+(rule "Copperbrain_fanout_R7"
+  (condition "A.intersectsCourtyard('R7')")
+  (constraint track_width (min 0.2mm) (opt 0.82mm))
+)
+(rule "Copperbrain_fanout_clearance_R7"
+  (condition "A.intersectsCourtyard('R7') || B.intersectsCourtyard('R7')")
+  (constraint clearance (min 0.2mm))
+)
+(rule "Copperbrain_fanout_R8"
+  (condition "A.intersectsCourtyard('R8')")
+  (constraint track_width (min 0.2mm) (opt 0.9mm))
+)
+(rule "Copperbrain_fanout_clearance_R8"
+  (condition "A.intersectsCourtyard('R8') || B.intersectsCourtyard('R8')")
+  (constraint clearance (min 0.2mm))
+)
+(rule "Copperbrain_fanout_RS1"
+  (condition "A.intersectsCourtyard('RS1')")
+  (constraint track_width (min 0.2mm) (opt 0.6mm))
+)
+(rule "Copperbrain_fanout_clearance_RS1"
+  (condition "A.intersectsCourtyard('RS1') || B.intersectsCourtyard('RS1')")
+  (constraint clearance (min 0.2mm))
+)
+(rule "Copperbrain_fanout_U1"
+  (condition "A.intersectsCourtyard('U1')")
+  (constraint track_width (min 0.2mm) (opt 0.24mm))
+)
+(rule "Copperbrain_fanout_clearance_U1"
+  (condition "A.intersectsCourtyard('U1') || B.intersectsCourtyard('U1')")
+  (constraint clearance (min 0.2mm))
+)
+# END COPPERBRAIN MANAGED RULES

@@ -196,7 +196,14 @@ class SchematicApiAdapter:
                         ErrorCode.INVALID_INPUT,
                         "Schematic label stub length must be between 2.54 and 25.4 mm",
                     )
-                outward_rotation = (pin_rotation + 180) % 360
+                delta_x = pin_position.x - label_component.position.x
+                delta_y = pin_position.y - label_component.position.y
+                if abs(delta_x) > abs(delta_y) and abs(delta_x) > 0.001:
+                    outward_rotation = 0.0 if delta_x > 0 else 180.0
+                elif abs(delta_y) > 0.001:
+                    outward_rotation = 270.0 if delta_y > 0 else 90.0
+                else:
+                    outward_rotation = (pin_rotation + 180) % 360
                 direction = {
                     0.0: (1.0, 0.0),
                     90.0: (0.0, -1.0),

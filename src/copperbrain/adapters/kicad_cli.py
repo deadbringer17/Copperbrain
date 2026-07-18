@@ -39,24 +39,25 @@ def _run(command: list[str], *, timeout: float = 60) -> subprocess.CompletedProc
 
 @contextmanager
 def _preserve_project_local_state(source: Path) -> Iterator[None]:
-    """Undo KiCad CLI's incidental same-stem local-preference write."""
-    local_state = source.with_suffix(".kicad_prl")
-    original = local_state.read_bytes() if local_state.is_file() else None
+    """Undo incidental same-stem preference and project-metadata writes."""
+    states = (source.with_suffix(".kicad_prl"), source.with_suffix(".kicad_pro"))
+    originals = {path: path.read_bytes() if path.is_file() else None for path in states}
     try:
         yield
     finally:
-        if original is None:
-            local_state.unlink(missing_ok=True)
-        elif not local_state.is_file() or local_state.read_bytes() != original:
-            descriptor, temporary = tempfile.mkstemp(
-                prefix=f".{local_state.name}.", dir=local_state.parent
-            )
+        for state, original in originals.items():
+            if original is None:
+                state.unlink(missing_ok=True)
+                continue
+            if state.is_file() and state.read_bytes() == original:
+                continue
+            descriptor, temporary = tempfile.mkstemp(prefix=f".{state.name}.", dir=state.parent)
             try:
                 with os.fdopen(descriptor, "wb") as stream:
                     stream.write(original)
                     stream.flush()
                     os.fsync(stream.fileno())
-                os.replace(temporary, local_state)
+                os.replace(temporary, state)
             finally:
                 if os.path.exists(temporary):
                     os.unlink(temporary)
