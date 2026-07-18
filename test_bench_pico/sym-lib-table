@@ -1,5 +1,0 @@
-(sym_lib_table
-  (lib (name "Copperbrain_CSD18540")(type "KiCad")(uri "${KIPRJMOD}/copperbrain-libs/Copperbrain_CSD18540.kicad_sym")(options "")(descr ""))
-  (lib (name "Copperbrain_DRV8701")(type "KiCad")(uri "${KIPRJMOD}/copperbrain-libs/Copperbrain_DRV8701.kicad_sym")(options "")(descr ""))
-  (lib (name "Copperbrain_THVD1429")(type "KiCad")(uri "${KIPRJMOD}/copperbrain-libs/Copperbrain_THVD1429.kicad_sym")(options "")(descr ""))
-)
