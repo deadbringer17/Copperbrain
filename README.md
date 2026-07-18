@@ -4,7 +4,7 @@ Copperbrain is a local MCP server for safe KiCad 10 schematic/PCB analysis, dete
 JLCPCB/LCSC sourcing, controlled changes, ERC/DRC validation, typed PCB design rules, and
 component-only BOM estimates.
 
-See `DEVELOPMENT_PLAN.md` for scope and contracts, `docs/INSTALLATION.md` for setup, and
+See this README for scope and public contracts, `docs/INSTALLATION.md` for setup, and
 `docs/DEMO.md` for the reproducible reference flow.
 
 ## Development

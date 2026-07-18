@@ -2,14 +2,13 @@
 
 This wiki is the concise navigation map for the Copperbrain repository. Update it in the same change set whenever code, configuration, tests, or repository structure changes.
 
-For product scope and architecture decisions, read [`DEVELOPMENT_PLAN.md`](../DEVELOPMENT_PLAN.md). For agent operating rules, read [`AGENTS.md`](../AGENTS.md).
+For product scope and public contracts, read [`README.md`](../README.md). For agent operating rules, read [`AGENTS.md`](../AGENTS.md).
 
 ## Repository Map
 
 | Path | Responsibility | Change here when |
 |---|---|---|
 | `AGENTS.md` | Real-project workflow, architecture, safety, mandatory connectivity/routing metrics, testing, Git, and documentation rules | The operational workflow or agent guardrails change |
-| `DEVELOPMENT_PLAN.md` | Approved product scope, architecture, MCP contracts, and acceptance criteria | An approved product or architectural decision changes |
 | `docs/WORKSPACE_WIKI.md` | Fast path-oriented map of the workspace | Any relevant file, responsibility, entry point, relationship, or test location changes |
 | `pyproject.toml` | Package metadata, runtime/dev dependencies, and validation tool configuration | Dependencies, entry points, or validation policy changes |
 | `README.md` | Installation, server launch, and user-facing workflow | Setup or public usage changes |
@@ -95,7 +94,7 @@ the configured Copperbrain data directory.
 ## Navigation Rules
 
 - Start here to locate likely files, then confirm the information against the current repository.
-- Describe responsibilities and relationships; do not duplicate implementation details or the development plan.
+- Describe responsibilities and relationships; do not duplicate implementation details or public contract documentation.
 - Prefer repository-relative paths in backticks.
 - Keep entries short enough to scan quickly.
 - Remove stale entries in the same change that removes or moves their targets.

@@ -6,8 +6,8 @@ Copperbrain is a Python 3.11+ local MCP server for safe, evidence-backed KiCad w
 analysis, component sourcing, controlled schematic and PCB changes, ERC/DRC validation, placement,
 grounding, routing, BOM estimation, preview, apply, and rollback.
 
-Read `DEVELOPMENT_PLAN.md` before changing product contracts or architecture. Use
-`docs/WORKSPACE_WIKI.md` to locate responsibilities and tests. This file defines the operational
+Read `README.md` before changing public product contracts and use `docs/WORKSPACE_WIKI.md` to
+locate architecture responsibilities and tests. This file defines the operational
 rules agents must follow while working in the repository and on real KiCad projects; it is not a
 progress tracker or a duplicate product specification.
 
@@ -259,8 +259,8 @@ uv run mypy src
 - Avoid leaking adapter types into application or domain layers.
 - Prefer explicit configuration and dependency injection over global state and implicit environment
   behavior.
-- Update `DEVELOPMENT_PLAN.md` only when an approved product or architectural decision changes; do
-  not rewrite it to match an implementation shortcut.
+- Update the relevant README contract and workspace-wiki responsibilities whenever an approved
+  product or architectural decision changes; do not document implementation shortcuts as policy.
 - Do not commit or push unless the user explicitly requests it.
 - Never use destructive Git operations, discard user work, or rewrite history without explicit
   authorization.
