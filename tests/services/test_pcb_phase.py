@@ -5,7 +5,7 @@ from typing import cast
 
 import pytest
 
-from copperbrain.adapters.freerouting import RoutingBackend
+from copperbrain.adapters.routing_backend import RoutingBackend
 from copperbrain.errors import CopperbrainError
 from copperbrain.models import (
     ChangeStatus,

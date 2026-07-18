@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from copperbrain.models import (
     ComponentCandidate,
+    ConnectivityMetricRecord,
     GroundDomainRequest,
     GroundingRequest,
     ManufacturingProfile,
@@ -138,3 +139,29 @@ def test_project_creation_spec_rejects_paths_and_unsupported_layers() -> None:
         ProjectCreationSpec(name="../unsafe")
     with pytest.raises(ValidationError):
         ProjectCreationSpec(name="bench", copper_layers=6)
+
+
+def test_connectivity_metrics_migrate_legacy_router_fields() -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    record = ConnectivityMetricRecord.model_validate(
+        {
+            "schema_version": 4,
+            "run_id": "a" * 32,
+            "phase": "candidate",
+            "outcome": "success",
+            "started_at": now,
+            "finished_at": now,
+            "duration_seconds": 1,
+            "project_fingerprint": "b" * 64,
+            "backend": "legacy",
+            "strategy": "prioritized_single_thread",
+            "baseline_open_connection_count": 2,
+            "freerouting_pass_metrics": [{"pass_number": 1, "board_unrouted_count": 1}],
+            "freerouting_normalization_count": 3,
+        }
+    )
+
+    assert record.strategy == "original"
+    assert record.routing_pass_metrics[0].board_unrouted_count == 1
+    assert record.normalization_count == 3
+    assert "freerouting_pass_metrics" not in record.model_dump()

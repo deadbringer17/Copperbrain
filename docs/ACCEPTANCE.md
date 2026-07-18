@@ -74,9 +74,9 @@ KiCad 10, JLCImport, and JLCPCB Tools are all detected and exercised.
 | Criterion | Evidence |
 |---|---|
 | Typed connectivity and operations | `tests/adapters/test_pcb_routing_adapter.py` verifies open-net detection and allowlisted segment writing |
-| Fixed-command specialized backend | `tests/adapters/test_freerouting.py` verifies Java/JAR/KiCad-Python status, DSN sanitization, bounded arguments, hash-bound capability validation, and unavailable-backend refusal |
-| Exact requested-net scope | FreeRouting adapter regressions retain all DSN nets/planes, split non-target members into preserve classes, pass verified class exclusions, and refuse absent targets or an incapable/tampered JAR before routing starts |
-| Zone and precision-safe round trip | FreeRouting adapter tests cover the fixed refill command; routing service tests accept only sub-micron Specctra rounding while still rejecting actual existing-copper changes, and comparative DRC runs after KiCad zone refill |
+| Fixed-command specialized backend | `tests/adapters/test_kicad_routing_tools.py` verifies managed runtime/core status, bounded exact-net arguments, sanitized output, structured failure evidence, and unavailable-backend refusal |
+| Exact requested-net scope | KiCadRoutingTools receives only the materialized nonempty target set through fixed `--nets` arguments; service tests reject out-of-scope copper and any changed or removed existing copper |
+| Zone and precision-safe round trip | The fixed KiCad board worker refills zones; routing service tests extract typed deltas from the original-precision board and comparative DRC runs after refill |
 | Typed import and KiCad 9/10 compatibility | `tests/adapters/test_pcb_routing_adapter.py` verifies numeric and name-valued copper nets plus allowlisted segment/via extraction on declared outer and inner copper layers |
 | Deterministic candidate evaluation | `tests/services/test_pcb_routing.py` verifies typed deltas, rule-first role classification, diagnostic-only partial candidates, local hotspot evidence, schema-2 compatibility, stable ranking, throughput metrics, same-baseline comparison, and historical pass advice |
 | Source remains unchanged before confirmation | Routing service test compares live PCB bytes through proposal, prepare, and validation |
@@ -90,7 +90,7 @@ KiCad 10, JLCImport, and JLCPCB Tools are all detected and exercised.
 | Criterion | Evidence |
 |---|---|
 | Restart-safe routing lifecycle | `tests/services/test_pcb_routing.py` prepares, validates, applies, and rolls back through fresh service instances using the persisted manifest |
-| Autorouter loop containment | `tests/adapters/test_freerouting.py` proves normalization and semantic no-improvement watchdogs stop boundedly and return structured per-pass evidence |
+| Autorouter loop containment | `tests/adapters/test_kicad_routing_tools.py` and adapter watchdog code cover hard candidate limits, bounded output, wall-time/output-stall termination, process-tree cleanup, and structured attempt evidence |
 | Correlated lifecycle evidence | `tests/services/test_pcb_routing.py` verifies prepare, validate, apply, and rollback records point to the proposal through `parent_run_id` |
 | Safe incremental-routing default | Routing service regression rejects pre-existing copper unless the caller explicitly selects `preserve` |
 | Output copies never become sources | Project/output tests reject opening or publishing recursively below `copperbrain-output/` |

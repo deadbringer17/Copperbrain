@@ -6,19 +6,20 @@ from pathlib import Path
 
 import pytest
 
-from copperbrain.adapters.freerouting import FreeRoutingAdapter, RoutedBoardCandidate
+from copperbrain.adapters.kicad_routing_tools import KiCadRoutingToolsAdapter
 from copperbrain.adapters.pcb_design import KiCadPcbIpcAdapter, PcbFileAdapter
+from copperbrain.adapters.routing_backend import RoutedBoardCandidate, RoutingStrategy
 from copperbrain.errors import CopperbrainError
 from copperbrain.models import (
     ChangeStatus,
     DrcReport,
     ErrorCode,
-    FreeRoutingPassMetric,
     IntegrationStatus,
     PcbPadInspection,
     RouteSegment,
     RoutingAnalysis,
     RoutingBackendStatus,
+    RoutingPassMetric,
     RoutingRequest,
     UnroutedConnection,
 )
@@ -35,8 +36,11 @@ class FakeRoutingBackend:
     def refill_zones(self, pcb: Path) -> None:
         assert pcb.is_file()
 
+    def strategies(self, request: RoutingRequest) -> tuple[RoutingStrategy, ...]:
+        return ("mps", "inside_out", "original")[: request.candidate_count]
+
     def route(
-        self, pcb: Path, workspace: Path, request: RoutingRequest, strategy: str
+        self, pcb: Path, workspace: Path, request: RoutingRequest, strategy: RoutingStrategy
     ) -> RoutedBoardCandidate:
         assert request.nets == ("GND",)
         workspace.mkdir(parents=True)
@@ -57,11 +61,11 @@ class FakeRoutingBackend:
             (),
         )
         return RoutedBoardCandidate(
-            strategy="prioritized",
+            strategy=strategy,
             pcb=routed,
             elapsed_seconds=0.01,
             pass_metrics=(
-                FreeRoutingPassMetric(
+                RoutingPassMetric(
                     pass_number=1,
                     board_incomplete_count=1,
                     queued_item_count=1,
@@ -79,22 +83,25 @@ class FailingRoutingBackend:
     def refill_zones(self, pcb: Path) -> None:
         assert pcb.is_file()
 
+    def strategies(self, request: RoutingRequest) -> tuple[RoutingStrategy, ...]:
+        return ("mps", "inside_out", "original")[: request.candidate_count]
+
     def route(
-        self, pcb: Path, workspace: Path, request: RoutingRequest, strategy: str
+        self, pcb: Path, workspace: Path, request: RoutingRequest, strategy: RoutingStrategy
     ) -> RoutedBoardCandidate:
         raise CopperbrainError(
             ErrorCode.VALIDATION_FAILED,
             "fixture routing failure",
             details={
                 "watchdog": "stalled",
-                "freerouting_pass_metrics": [
-                    FreeRoutingPassMetric(
+                "routing_pass_metrics": [
+                    RoutingPassMetric(
                         pass_number=1,
                         board_incomplete_count=1,
                         queued_item_count=1,
                     ).model_dump(mode="json")
                 ],
-                "freerouting_normalization_count": 2,
+                "normalization_count": 2,
             },
         )
 
@@ -297,7 +304,7 @@ def test_duplicate_candidates_are_reported(tmp_path: Path, monkeypatch: pytest.M
 
     assert len(plan.candidate_evaluations) == 2
     assert plan.candidate_evaluations[0].duplicate_of is None
-    assert plan.candidate_evaluations[1].duplicate_of == "prioritized"
+    assert plan.candidate_evaluations[1].duplicate_of == "mps"
     assert plan.candidate_evaluations[0].fingerprint == plan.candidate_evaluations[1].fingerprint
 
 
@@ -309,9 +316,9 @@ def test_autorouting_is_hard_limited_to_three_ranked_attempts(
     plan = service.propose(session, RoutingRequest(candidate_count=3))
 
     assert [item.strategy for item in plan.candidate_evaluations] == [
-        "prioritized",
-        "sequential",
-        "prioritized_single_thread",
+        "mps",
+        "inside_out",
+        "original",
     ]
     assert sum(item.selected for item in plan.candidate_evaluations) == 1
     assert any("hard maximum of three attempts" in item for item in plan.evidence)
@@ -326,7 +333,7 @@ def test_default_routing_proposal_runs_a_single_candidate(
 
     plan = service.propose(session, RoutingRequest())
 
-    assert [item.strategy for item in plan.candidate_evaluations] == ["prioritized"]
+    assert [item.strategy for item in plan.candidate_evaluations] == ["mps"]
 
 
 def test_routing_proposal_emits_reusable_connectivity_metrics(
@@ -339,16 +346,16 @@ def test_routing_proposal_emits_reusable_connectivity_metrics(
     records = sorted((tmp_path / "data" / "metrics" / "connectivity").rglob("*.json"))
     assert [path.name for path in records] == [
         "baseline.json",
-        "candidate-prioritized.json",
-        "candidate-prioritized_single_thread.json",
-        "candidate-sequential.json",
+        "candidate-inside_out.json",
+        "candidate-mps.json",
+        "candidate-original.json",
     ]
     payloads = [json.loads(path.read_text(encoding="utf-8")) for path in records]
     assert {payload["phase"] for payload in payloads} == {"baseline", "candidate"}
-    assert all(payload["schema_version"] == 4 for payload in payloads)
+    assert all(payload["schema_version"] == 5 for payload in payloads)
     assert all(len(payload["project_fingerprint"]) == 64 for payload in payloads)
     assert payloads[1]["outcome"] == "success"
-    assert payloads[1]["freerouting_pass_metrics"][0]["queued_item_count"] == 1
+    assert payloads[1]["routing_pass_metrics"][0]["queued_item_count"] == 1
     assert payloads[1]["requested_net_role_counts"] == {"ground": 1}
     assert payloads[1]["board_width_mm"] == 40
     assert payloads[1]["copper_layer_count"] == 2
@@ -362,11 +369,10 @@ def test_routing_proposal_emits_reusable_connectivity_metrics(
 
     summary = service.metrics_for_run(plan.metrics_run_id)
     assert summary.record_count == 4
-    assert summary.best_strategy == "prioritized"
+    assert summary.best_strategy == "mps"
     assert summary.best_open_connection_delta == 1
     assert summary.comparable_candidate_count == 3
     assert summary.failed_candidate_count == 0
-    assert summary.recommended_max_passes == 2
     assert summary.same_baseline_batches[0].run_id == plan.metrics_run_id
 
 
@@ -476,15 +482,13 @@ def test_failed_candidate_flushes_structured_metrics_before_error(
     assert diagnostics[0]["diagnostic_only"] is True
     assert diagnostics[0]["applicable"] is False
 
-    candidate = next(
-        (tmp_path / "data" / "metrics" / "connectivity").rglob("candidate-prioritized.json")
-    )
+    candidate = next((tmp_path / "data" / "metrics" / "connectivity").rglob("candidate-mps.json"))
     payload = json.loads(candidate.read_text(encoding="utf-8"))
     assert payload["outcome"] == "failure"
     assert payload["error_code"] == "validation_failed"
     assert payload["watchdog_reason"] == "stalled"
-    assert payload["freerouting_pass_metrics"][0]["board_incomplete_count"] == 1
-    assert payload["freerouting_normalization_count"] == 2
+    assert payload["routing_pass_metrics"][0]["board_incomplete_count"] == 1
+    assert payload["normalization_count"] == 2
     summary = service.metrics_for_run(candidate.parent.name)
     assert summary.failed_candidate_count == 3
     assert summary.best_observed_pass_number == 1
@@ -589,15 +593,14 @@ def test_routing_delta_tolerates_specctra_segment_subdivision(
 
 def test_unavailable_backend_is_actionable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     service, _, session = setup(tmp_path, monkeypatch)
-    service.routing_backend = FreeRoutingAdapter(
-        jar_path=None,
-        java_path=None,
+    service.routing_backend = KiCadRoutingToolsAdapter(
+        runtime_root=None,
         kicad_python_path=None,
     )
     with pytest.raises(CopperbrainError, match="unavailable") as caught:
         service.propose(session, RoutingRequest())
     assert caught.value.error.actionable_hint is not None
-    assert "COPPERBRAIN_FREEROUTING_JAR" in caught.value.error.actionable_hint
+    assert "COPPERBRAIN_KICAD_ROUTING_TOOLS_ROOT" in caught.value.error.actionable_hint
 
 
 def test_incremental_routing_requires_explicit_preserve_policy(

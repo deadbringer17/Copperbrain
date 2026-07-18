@@ -95,7 +95,7 @@ finished PCB.
 
 - Start every routing attempt from a recorded connectivity baseline and an explicit, nonempty set
   of target nets.
-- Classify targets before invoking FreeRouting:
+- Classify targets before invoking KiCadRoutingTools:
   - route ordinary signals in small, homogeneous batches through the verified local autorouter;
   - keep high-current, high-voltage, impedance-sensitive, differential, timing-sensitive, and
     thermally constrained nets out of generic routing until their dedicated strategy is reviewed.
@@ -108,7 +108,7 @@ finished PCB.
 - Keep a candidate only when it produces a measurable accepted improvement without new blocking
   violations. Stop, repartition the nets, or return to placement/rules when repeated attempts do not
   improve the best result.
-- Never introduce an implicit routing fallback. FreeRouting capability, incremental-copper policy,
+- Never introduce an implicit routing fallback. KiCadRoutingTools capability, incremental-copper policy,
   and any partial-result acceptance must be explicit and visible in the evidence.
 
 ### 7. Final validation and readiness

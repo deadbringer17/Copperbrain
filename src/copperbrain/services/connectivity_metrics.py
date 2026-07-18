@@ -21,7 +21,7 @@ def _observed_open_improvement(record: ConnectivityMetricRecord) -> int:
         return max(0, record.open_connection_delta)
     observed = tuple(
         value
-        for metric in record.freerouting_pass_metrics
+        for metric in record.routing_pass_metrics
         if (
             value := (
                 metric.board_unrouted_count
@@ -49,9 +49,12 @@ def _connections_per_pass(record: ConnectivityMetricRecord) -> float:
         return record.connections_resolved_per_pass
     return round(
         _observed_open_improvement(record)
-        / max(1, record.best_pass_number or len(record.freerouting_pass_metrics)),
+        / max(1, record.best_pass_number or len(record.routing_pass_metrics)),
         6,
     )
+
+
+_STRATEGY_ORDER = {"mps": 0, "inside_out": 1, "original": 2}
 
 
 class ConnectivityMetricsStore:
@@ -133,7 +136,7 @@ class ConnectivityMetricsStore:
                 item.new_drc_error_count if item.new_drc_error_count is not None else 1_000_000,
                 item.via_count,
                 item.routed_length_mm,
-                item.strategy or "",
+                _STRATEGY_ORDER.get(item.strategy or "", 99),
             ),
             default=None,
         )
@@ -155,16 +158,6 @@ class ConnectivityMetricsStore:
                     baseline.project_fingerprint
                 ):
                     corpus.append(item)
-        improving = tuple(
-            item
-            for item in corpus
-            if item.best_pass_number is not None and _observed_open_improvement(item) > 0
-        )
-        recommended_max_passes = (
-            min(200, max(2, max(item.best_pass_number or 1 for item in improving) + 1))
-            if improving
-            else None
-        )
         batches: list[RoutingBatchComparison] = []
         for candidate in sorted(corpus, key=lambda item: item.finished_at, reverse=True):
             if any(item.run_id == candidate.run_id for item in batches):
@@ -204,24 +197,5 @@ class ConnectivityMetricsStore:
                     }
                 )
             ),
-            recommended_max_passes=recommended_max_passes,
             same_baseline_batches=tuple(batches),
         )
-
-    def recommended_max_passes(self, project_fingerprint: str) -> int | None:
-        """Suggest a bounded pass budget from prior improving runs on the same board."""
-        best_passes: list[int] = []
-        for path in sorted(self.root.glob("*/*/candidate-*.json"), reverse=True)[:500]:
-            try:
-                item = ConnectivityMetricRecord.model_validate_json(
-                    path.read_text(encoding="utf-8")
-                )
-            except (OSError, ValueError):
-                continue
-            if (
-                item.project_fingerprint == project_fingerprint
-                and item.best_pass_number is not None
-                and _observed_open_improvement(item) > 0
-            ):
-                best_passes.append(item.best_pass_number)
-        return min(200, max(2, max(best_passes) + 1)) if best_passes else None

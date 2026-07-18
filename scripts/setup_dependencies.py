@@ -7,18 +7,14 @@ Never runs automatically and never runs through MCP. The user invokes it directl
 It fetches, from official sources only, over HTTPS, verifying a published checksum whenever
 the source provides one:
 
-  * a Java runtime (Eclipse Temurin JDK, via the Adoptium API) into
-    ``<COPPERBRAIN_DATA_DIR>/integrations/java/``;
-  * the latest official FreeRouting release JAR (via the GitHub Releases API) into
-    ``<COPPERBRAIN_DATA_DIR>/integrations/freerouting/``, with an honest
-    ``scoped_net_classes_cli=false`` capability record (see below);
+  * the pinned official KiCadRoutingTools PCM release, including its platform-specific Rust
+    core, into ``<COPPERBRAIN_DATA_DIR>/integrations/kicad-routing-tools/``;
   * the JLCImport and JLCPCB Tools KiCad plugins (via KiCad's own official PCM repository
     metadata at kicad.github.io) into the detected KiCad user ``3rdparty/plugins`` directory.
 
 The JLC plugin step writes outside this repository, into the local KiCad installation's plugin
-directory. Nothing here grants "scoped" (net-class-limited) FreeRouting routing: that requires a
-JAR whose headless ``-inc`` behavior has been independently verified, which this script cannot
-claim on your behalf. It always records ``scoped_net_classes_cli=false`` for what it downloads.
+directory. KiCadRoutingTools remains in Copperbrain's private integration directory and is never
+installed over, or imported from, a customer project.
 """
 
 from __future__ import annotations
@@ -28,8 +24,8 @@ import hashlib
 import json
 import platform
 import shutil
+import subprocess
 import sys
-import tarfile
 import tempfile
 import urllib.parse
 import urllib.request
@@ -51,6 +47,9 @@ _ALLOWED_HOST_SUFFIXES = (
 )
 _REQUEST_TIMEOUT_SECONDS = 20
 _DOWNLOAD_TIMEOUT_SECONDS = 300
+_MAX_DOWNLOAD_BYTES = 250_000_000
+_KICAD_ROUTING_TOOLS_VERSION = "0.18.2"
+_KICAD_ROUTING_TOOLS_SHA256 = "fcdec9e9c4ff3c614407831eda0abab15f8a57942e65fa0ea1f8a6288611bd64"
 
 
 def _allowed_host(url: str) -> bool:
@@ -98,8 +97,15 @@ def _download(url: str, destination: Path, *, expected_sha256: str | None) -> st
     try:
         with urllib.request.urlopen(request, timeout=_DOWNLOAD_TIMEOUT_SECONDS) as response:
             _require_allowed(response.geturl())
+            declared_length = response.headers.get("Content-Length")
+            if declared_length is not None and int(declared_length) > _MAX_DOWNLOAD_BYTES:
+                raise RuntimeError(f"Refusing download larger than {_MAX_DOWNLOAD_BYTES} bytes")
             with open(descriptor, "wb") as stream:
+                downloaded = 0
                 while chunk := response.read(1 << 20):
+                    downloaded += len(chunk)
+                    if downloaded > _MAX_DOWNLOAD_BYTES:
+                        raise RuntimeError(f"Download exceeded {_MAX_DOWNLOAD_BYTES} byte limit")
                     digest.update(chunk)
                     stream.write(chunk)
         actual = digest.hexdigest()
@@ -128,104 +134,78 @@ def _safe_extract_zip(archive: Path, target: Path) -> None:
         bundle.extractall(target)
 
 
-def _safe_extract_tar(archive: Path, target: Path) -> None:
-    target.mkdir(parents=True, exist_ok=True)
-    resolved_target = target.resolve()
-    with tarfile.open(archive) as bundle:
-        for member in bundle.getmembers():
-            if not (target / member.name).resolve().is_relative_to(resolved_target):
-                raise RuntimeError(f"Refusing to extract an unsafe path: {member.name}")
-        bundle.extractall(target)
-
-
-def _extract(archive: Path, target: Path) -> None:
-    if archive.suffix == ".zip":
-        _safe_extract_zip(archive, target)
-    elif archive.name.endswith((".tar.gz", ".tgz")):
-        _safe_extract_tar(archive, target)
-    else:
-        raise RuntimeError(f"Unsupported archive format: {archive.name}")
-
-
-def _adoptium_os() -> str:
-    system = platform.system().lower()
-    mapping = {"windows": "windows", "darwin": "mac", "linux": "linux"}
-    if system not in mapping:
-        raise RuntimeError(f"Unsupported operating system for Java download: {system}")
-    return mapping[system]
-
-
-def _adoptium_arch() -> str:
-    machine = platform.machine().lower()
-    if machine in ("amd64", "x86_64"):
-        return "x64"
-    if machine in ("arm64", "aarch64"):
-        return "aarch64"
-    raise RuntimeError(f"Unsupported CPU architecture for Java download: {machine}")
-
-
-def setup_java(data_dir: Path) -> None:
-    os_name = _adoptium_os()
-    arch = _adoptium_arch()
-    url = (
-        "https://api.adoptium.net/v3/assets/latest/25/hotspot"
-        f"?image_type=jdk&os={os_name}&architecture={arch}&vendor=eclipse"
+def setup_kicad_routing_tools(data_dir: Path) -> None:
+    version = _KICAD_ROUTING_TOOLS_VERSION
+    asset_name = f"KiCadRoutingTools-{version}.zip"
+    download_url = (
+        f"https://github.com/drandyhaas/KiCadRoutingTools/releases/download/v{version}/{asset_name}"
     )
-    assets = _get_json(url)
-    if not assets:
-        raise RuntimeError("Adoptium has no Java 25 build published for this platform yet")
-    package = assets[0]["binary"]["package"]
-    target_dir = data_dir / "integrations" / "java"
-    archive_path = target_dir / package["name"]
-    print(f"Downloading Java 25 ({os_name}/{arch}) from Adoptium...")
-    _download(package["link"], archive_path, expected_sha256=package.get("checksum"))
-    print(f"Extracting {archive_path.name}...")
-    _extract(archive_path, target_dir)
-    archive_path.unlink()
-    print(f"Java installed under {target_dir}")
-
-
-def setup_freerouting(data_dir: Path) -> None:
-    release = _get_json("https://api.github.com/repos/freerouting/freerouting/releases/latest")
-    jar_asset = next(
-        (asset for asset in release.get("assets", ()) if asset["name"].lower().endswith(".jar")),
-        None,
-    )
-    if jar_asset is None:
-        raise RuntimeError("The latest FreeRouting GitHub release has no .jar asset")
-    version = str(release.get("tag_name", "")).lstrip("v") or "unknown"
-    name = (
-        jar_asset["name"]
-        if jar_asset["name"].lower().startswith("freerouting")
-        else (f"freerouting-{version}.jar")
-    )
-    target_dir = data_dir / "integrations" / "freerouting"
-    jar_path = target_dir / name
-    digest_field = jar_asset.get("digest") or ""
-    expected = digest_field.split(":", 1)[1] if digest_field.startswith("sha256:") else None
-    print(f"Downloading FreeRouting {version} from {jar_asset['browser_download_url']}...")
-    actual_hash = _download(jar_asset["browser_download_url"], jar_path, expected_sha256=expected)
-    capability_path = jar_path.with_name(f"{jar_path.name}.capabilities.json")
-    capability_path.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "jar_sha256": actual_hash,
-                "scoped_net_classes_cli": False,
-                "description": (
-                    "Unmodified upstream FreeRouting release fetched by "
-                    "scripts/setup_dependencies.py. Headless -inc net-class exclusion is not "
-                    "independently verified for this build, so only full-board routing runs. "
-                    "Only flip this to true after verifying scoped exclusion on this exact JAR."
-                ),
-            },
-            indent=2,
+    target = data_dir / "integrations" / "kicad-routing-tools" / version
+    runtime_root = target / "plugins"
+    if (runtime_root / "route.py").is_file() and (runtime_root / "VERSION").is_file():
+        _validate_routing_runtime(runtime_root)
+        print(f"KiCadRoutingTools {version} is already installed at {runtime_root}")
+        return
+    print(f"Downloading KiCadRoutingTools {version} from {download_url}...")
+    with tempfile.TemporaryDirectory(prefix="copperbrain-kicad-routing-tools-") as workdir:
+        archive = Path(workdir) / asset_name
+        extracted = Path(workdir) / "extracted"
+        _download(
+            download_url,
+            archive,
+            expected_sha256=_KICAD_ROUTING_TOOLS_SHA256,
         )
-        + "\n",
-        encoding="utf-8",
-    )
-    print(f"FreeRouting installed at {jar_path}")
-    print(f"  wrote {capability_path.name} (scoped_net_classes_cli=false, see its description)")
+        _safe_extract_zip(archive, extracted)
+        staged_runtime = extracted / "plugins"
+        if (
+            not (staged_runtime / "route.py").is_file()
+            or not (staged_runtime / "LICENSE").is_file()
+        ):
+            raise RuntimeError("KiCadRoutingTools PCM archive has an unexpected layout")
+        rust_dir = staged_runtime / "rust_router"
+        machine = platform.machine().lower()
+        if sys.platform == "win32" and machine in ("amd64", "x86_64"):
+            source = rust_dir / "grid_router-windows-x86_64.pyd"
+            canonical = rust_dir / "grid_router.pyd"
+        elif sys.platform.startswith("linux") and machine in ("amd64", "x86_64"):
+            source = rust_dir / "grid_router-linux-x86_64.so"
+            canonical = rust_dir / "grid_router.so"
+        elif sys.platform == "darwin" and machine == "arm64":
+            source = rust_dir / "grid_router-macos-arm64.so"
+            canonical = rust_dir / "grid_router.so"
+        elif sys.platform == "darwin" and machine in ("amd64", "x86_64"):
+            source = rust_dir / "grid_router-macos-x86_64.so"
+            canonical = rust_dir / "grid_router.so"
+        else:
+            raise RuntimeError(f"No prebuilt KiCadRoutingTools core for {sys.platform}/{machine}")
+        if not source.is_file():
+            raise RuntimeError(f"KiCadRoutingTools archive is missing {source.name}")
+        shutil.copy2(source, canonical)
+        _validate_routing_runtime(staged_runtime)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            raise RuntimeError(f"Refusing to replace incomplete runtime directory: {target}")
+        shutil.move(str(extracted), target)
+    print(f"KiCadRoutingTools {version} installed at {runtime_root}")
+
+
+def _validate_routing_runtime(runtime_root: Path) -> None:
+    """Prove Python dependencies and the platform Rust ABI before installation succeeds."""
+    try:
+        result = subprocess.run(
+            [sys.executable, str(runtime_root / "startup_checks.py")],
+            cwd=runtime_root,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"KiCadRoutingTools runtime validation failed: {exc}") from exc
+    if result.returncode != 0:
+        reason = (result.stderr or result.stdout)[-4000:]
+        raise RuntimeError(f"KiCadRoutingTools runtime validation failed: {reason}")
 
 
 def _kicad_plugin_root(explicit: Path | None) -> Path:
@@ -299,9 +279,8 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--yes", "-y", action="store_true", help="Skip the confirmation prompt")
-    parser.add_argument("--skip-java", action="store_true", help="Do not download a Java runtime")
     parser.add_argument(
-        "--skip-freerouting", action="store_true", help="Do not download FreeRouting"
+        "--skip-routing", action="store_true", help="Do not download KiCadRoutingTools"
     )
     parser.add_argument(
         "--skip-jlc-plugins", action="store_true", help="Do not install JLC KiCad plugins"
@@ -321,14 +300,15 @@ def main() -> None:
 
     print("Copperbrain dependency setup")
     print(f"  Copperbrain data directory: {data_dir}")
-    if not args.skip_java:
-        print("  - Java 25 (Eclipse Temurin JDK)      -> integrations/java/ (inside data dir)")
-    if not args.skip_freerouting:
-        print("  - FreeRouting (latest official JAR)  -> integrations/freerouting/ (data dir)")
+    if not args.skip_routing:
+        print(
+            "  - KiCadRoutingTools + Rust core       -> "
+            "integrations/kicad-routing-tools/ (data dir)"
+        )
     if not args.skip_jlc_plugins:
         print("  - JLCImport / JLCPCB Tools plugins   -> KiCad's 3rdparty/plugins/ (not in repo)")
     print()
-    print("All downloads use HTTPS from official sources only (GitHub, Adoptium, kicad.github.io)")
+    print("All downloads use HTTPS from official sources only (GitHub and kicad.github.io)")
     print("and are checksum-verified whenever the source publishes one.")
     print()
     if not _confirm("Proceed?", assume_yes=args.yes):
@@ -337,19 +317,12 @@ def main() -> None:
 
     failures: list[str] = []
 
-    if not args.skip_java:
+    if not args.skip_routing:
         try:
-            setup_java(data_dir)
+            setup_kicad_routing_tools(data_dir)
         except (RuntimeError, OSError, KeyError, ValueError) as exc:
-            print(f"Java setup failed: {exc}", file=sys.stderr)
-            failures.append("java")
-
-    if not args.skip_freerouting:
-        try:
-            setup_freerouting(data_dir)
-        except (RuntimeError, OSError, KeyError, ValueError) as exc:
-            print(f"FreeRouting setup failed: {exc}", file=sys.stderr)
-            failures.append("freerouting")
+            print(f"KiCadRoutingTools setup failed: {exc}", file=sys.stderr)
+            failures.append("kicad-routing-tools")
 
     if not args.skip_jlc_plugins:
         try:
@@ -368,8 +341,7 @@ def main() -> None:
     else:
         print("Finished.")
     print("Call the MCP tools `detect_kicad` and `get_routing_backend_status` to confirm what")
-    print("Copperbrain now sees. Scoped (net-class-limited) routing still requires a JAR with an")
-    print("independently verified .capabilities.json; this script never claims that for you.")
+    print("Copperbrain now sees. The MCP routes only explicit, nonempty net batches.")
     if failures:
         sys.exit(1)
 

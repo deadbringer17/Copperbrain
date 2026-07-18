@@ -934,9 +934,11 @@ class RoutingRequest(FrozenModel):
     require_complete: bool = True
     existing_copper_policy: Literal["reject", "preserve"] = "reject"
     candidate_count: Annotated[int, Field(ge=1, le=3)] = 1
-    max_passes: Annotated[int, Field(ge=1, le=200)] = 30
-    semantic_stagnation_passes: Annotated[int, Field(ge=1, le=50)] = 8
-    thread_count: Annotated[int, Field(ge=0, le=64)] = 0
+    max_iterations: Annotated[int, Field(ge=1_000, le=10_000_000)] = 200_000
+    max_probe_iterations: Annotated[int, Field(ge=100, le=1_000_000)] = 5_000
+    heuristic_weight: Annotated[float, Field(ge=1, le=5)] = 1.9
+    via_cost: Annotated[int, Field(ge=0, le=100_000)] = 50
+    max_ripup: Annotated[int, Field(ge=0, le=20)] = 3
     excluded_plane_nets: Annotated[tuple[str, ...], Field(max_length=32)] = ()
     allow_fine_pitch_escape_stubs: bool = False
     seed_segments: Annotated[tuple[RouteSegment, ...], Field(max_length=512)] = ()
@@ -981,8 +983,8 @@ class RoutingRequest(FrozenModel):
         return self
 
 
-class FreeRoutingPassMetric(FrozenModel):
-    """Bounded progress evidence parsed from one FreeRouting autorouter pass."""
+class RoutingPassMetric(FrozenModel):
+    """Bounded progress evidence emitted by one autorouter attempt."""
 
     pass_number: Annotated[int, Field(ge=1)]
     board_incomplete_count: Annotated[int, Field(ge=0)] | None = None
@@ -1000,7 +1002,7 @@ class FreeRoutingPassMetric(FrozenModel):
 class ConnectivityMetricRecord(FrozenModel):
     """Versioned private observation for connectivity and routing regression analysis."""
 
-    schema_version: Literal[2, 3, 4] = 4
+    schema_version: Literal[2, 3, 4, 5] = 5
     run_id: str = Field(pattern=r"^[0-9a-f]{32}$")
     parent_run_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
     operation: Literal["routing_proposal", "routing_change"] = "routing_proposal"
@@ -1019,7 +1021,7 @@ class ConnectivityMetricRecord(FrozenModel):
     placement_density_percent: Annotated[float, Field(ge=0, le=100)] | None = None
     backend: str
     backend_version: str | None = None
-    strategy: Literal["prioritized", "sequential", "prioritized_single_thread"] | None = None
+    strategy: Literal["mps", "inside_out", "original"] | None = None
     effective_configuration: dict[str, str | int | float | bool] = Field(default_factory=dict)
     requested_net_count: Annotated[int, Field(ge=0)] = 0
     requested_net_role_counts: dict[str, Annotated[int, Field(ge=0)]] = Field(default_factory=dict)
@@ -1043,8 +1045,8 @@ class ConnectivityMetricRecord(FrozenModel):
     new_drc_warning_count: Annotated[int, Field(ge=0)] | None = None
     error_code: ErrorCode | None = None
     watchdog_reason: str | None = None
-    freerouting_pass_metrics: tuple[FreeRoutingPassMetric, ...] = ()
-    freerouting_normalization_count: Annotated[int, Field(ge=0)] = 0
+    routing_pass_metrics: tuple[RoutingPassMetric, ...] = ()
+    normalization_count: Annotated[int, Field(ge=0)] = 0
     best_pass_number: Annotated[int, Field(ge=1)] | None = None
     failed_route_count: Annotated[int, Field(ge=0)] = 0
     stagnation_count: Annotated[int, Field(ge=0)] = 0
@@ -1054,6 +1056,33 @@ class ConnectivityMetricRecord(FrozenModel):
     connections_resolved_per_pass: Annotated[float, Field(ge=0)] = 0
     diagnostic_only: bool = False
     applicable: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_router_fields(cls, value: Any) -> Any:
+        """Read schema 2-4 FreeRouting records without emitting legacy fields."""
+        if not isinstance(value, dict):
+            return value
+        migrated = dict(value)
+        if "routing_pass_metrics" not in migrated:
+            migrated["routing_pass_metrics"] = migrated.pop("freerouting_pass_metrics", ())
+        else:
+            migrated.pop("freerouting_pass_metrics", None)
+        if "normalization_count" not in migrated:
+            migrated["normalization_count"] = migrated.pop("freerouting_normalization_count", 0)
+        else:
+            migrated.pop("freerouting_normalization_count", None)
+        strategy = migrated.get("strategy")
+        migrated["strategy"] = (
+            {
+                "prioritized": "mps",
+                "sequential": "inside_out",
+                "prioritized_single_thread": "original",
+            }.get(strategy, strategy)
+            if isinstance(strategy, str)
+            else strategy
+        )
+        return migrated
 
 
 class RoutingBatchComparison(FrozenModel):
@@ -1076,21 +1105,20 @@ class ConnectivityMetricRunSummary(FrozenModel):
     run_id: str = Field(pattern=r"^[0-9a-f]{32}$")
     record_count: Annotated[int, Field(ge=1)]
     records: Annotated[tuple[ConnectivityMetricRecord, ...], Field(min_length=1)]
-    best_strategy: Literal["prioritized", "sequential", "prioritized_single_thread"] | None = None
+    best_strategy: Literal["mps", "inside_out", "original"] | None = None
     best_open_connection_delta: int | None = None
     comparable_candidate_count: Annotated[int, Field(ge=0)] = 0
     failed_candidate_count: Annotated[int, Field(ge=0)] = 0
     best_observed_pass_number: Annotated[int, Field(ge=1)] | None = None
     highest_stagnation_count: Annotated[int, Field(ge=0)] = 0
     watchdog_reasons: tuple[str, ...] = ()
-    recommended_max_passes: Annotated[int, Field(ge=1, le=200)] | None = None
     same_baseline_batches: tuple[RoutingBatchComparison, ...] = ()
 
 
 class RoutingCandidateEvaluation(FrozenModel):
     """Deterministic evidence used to rank one external autorouter result."""
 
-    strategy: Literal["prioritized", "sequential", "prioritized_single_thread"]
+    strategy: Literal["mps", "inside_out", "original"]
     selected: bool = False
     complete: bool
     unrouted_connection_count: Annotated[int, Field(ge=0)]
@@ -1100,10 +1128,10 @@ class RoutingCandidateEvaluation(FrozenModel):
     via_count: Annotated[int, Field(ge=0)]
     track_length_mm: Annotated[float, Field(ge=0)]
     fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
-    duplicate_of: Literal["prioritized", "sequential", "prioritized_single_thread"] | None = None
+    duplicate_of: Literal["mps", "inside_out", "original"] | None = None
     backend_elapsed_seconds: Annotated[float, Field(ge=0)] = 0
-    freerouting_pass_metrics: tuple[FreeRoutingPassMetric, ...] = ()
-    freerouting_normalization_count: Annotated[int, Field(ge=0)] = 0
+    routing_pass_metrics: tuple[RoutingPassMetric, ...] = ()
+    normalization_count: Annotated[int, Field(ge=0)] = 0
     applicable: bool = True
     diagnostic_only: bool = False
     failure_reason: str | None = None
@@ -1126,27 +1154,15 @@ class RoutingHotspot(FrozenModel):
 class RoutingBackendStatus(FrozenModel):
     """Availability of the fixed-command local PCB autorouting backend."""
 
-    name: Literal["FreeRouting"] = "FreeRouting"
+    name: Literal["KiCadRoutingTools"] = "KiCadRoutingTools"
     available: bool
     version: str | None = None
-    java_major_version: Annotated[int, Field(ge=1)] | None = None
-    java_path: Path | None = None
-    jar_path: Path | None = None
+    runtime_root: Path | None = None
+    python_path: Path | None = None
+    rust_core_path: Path | None = None
     kicad_python_path: Path | None = None
-    scoped_routing_supported: bool = False
-    capability_path: Path | None = None
-    capability_reason: str | None = None
+    scoped_routing_supported: bool = True
     reason: str | None = None
-
-
-class FreeRoutingCapabilityRecord(FrozenModel):
-    """Hash-bound claims for behavior not discoverable from the FreeRouting version alone."""
-
-    schema_version: Literal[1] = 1
-    jar_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    scoped_net_classes_cli: bool = False
-    source_commit: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
-    description: str | None = None
 
 
 class RoutingPlan(FrozenModel):
@@ -1157,13 +1173,12 @@ class RoutingPlan(FrozenModel):
     target_nets: Annotated[tuple[str, ...], Field(min_length=1)]
     analysis_before: RoutingAnalysis
     predicted_complete: bool
-    backend: Literal["freerouting", "test"] = "freerouting"
+    backend: Literal["kicad_routing_tools", "test"] = "kicad_routing_tools"
     backend_version: str | None = None
     metrics_run_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
     candidate_evaluations: tuple[RoutingCandidateEvaluation, ...] = ()
     routing_hotspots: tuple[RoutingHotspot, ...] = ()
     placement_rework_recommended: bool = False
-    recommended_max_passes: Annotated[int, Field(ge=1, le=200)] | None = None
     evidence: tuple[str, ...] = ()
     assumptions: tuple[str, ...] = ()
 

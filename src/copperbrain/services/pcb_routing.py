@@ -18,20 +18,20 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from copperbrain.adapters.freerouting import (
-    FreeRoutingAdapter,
-    RoutedBoardCandidate,
-    RoutingBackend,
-    RoutingStrategy,
-)
 from copperbrain.adapters.kicad_cli import export_pcb_pdf, run_drc
 from copperbrain.adapters.kicad_detection import detect_kicad
+from copperbrain.adapters.kicad_routing_tools import KiCadRoutingToolsAdapter
 from copperbrain.adapters.pcb_design import PcbFileAdapter
 from copperbrain.adapters.pcb_rules import (
     read_managed_roles,
     read_managed_widths,
     read_netclasses,
     stage_router_project,
+)
+from copperbrain.adapters.routing_backend import (
+    RoutedBoardCandidate,
+    RoutingBackend,
+    RoutingStrategy,
 )
 from copperbrain.errors import CopperbrainError
 from copperbrain.models import (
@@ -40,7 +40,6 @@ from copperbrain.models import (
     ConnectivityMetricRunSummary,
     DrcReport,
     ErrorCode,
-    FreeRoutingPassMetric,
     PcbPadInspection,
     PcbRoutingChangeSet,
     ProjectSession,
@@ -51,6 +50,7 @@ from copperbrain.models import (
     RoutingCandidateEvaluation,
     RoutingChangeRecord,
     RoutingHotspot,
+    RoutingPassMetric,
     RoutingPlan,
     RoutingRequest,
     RoutingReviewSummary,
@@ -165,7 +165,7 @@ class PcbRoutingService:
         self.pdf_exporter = pdf_exporter or (
             lambda pcb, destination: export_pcb_pdf(detect_kicad().selected_cli, pcb, destination)
         )
-        self.routing_backend = routing_backend or FreeRoutingAdapter.discover(data_dir)
+        self.routing_backend = routing_backend or KiCadRoutingToolsAdapter.discover(data_dir)
         self.publish_artifacts = publish_artifacts
         self.metrics = ConnectivityMetricsStore(data_dir)
         self._changes: dict[str, _PreparedRouting] = {}
@@ -465,7 +465,7 @@ class PcbRoutingService:
                 ErrorCode.VALIDATION_FAILED,
                 "The autorouter changed or removed existing copper",
                 actionable_hint=(
-                    "Route from a clean board or preserve existing tracks in FreeRouting."
+                    "Route from a clean board or preserve existing tracks in the router."
                 ),
                 details={
                     "removed_segments": len(removed_segments),
@@ -1042,7 +1042,7 @@ class PcbRoutingService:
 
     @staticmethod
     def _pass_optimization_summary(
-        metrics: tuple[FreeRoutingPassMetric, ...],
+        metrics: tuple[RoutingPassMetric, ...],
     ) -> tuple[int | None, int, int, float | None, float | None]:
         best_pass: int | None = None
         best_open: int | None = None
@@ -1074,23 +1074,23 @@ class PcbRoutingService:
         )
 
     @staticmethod
-    def _freerouting_metrics_from_error(
+    def _routing_metrics_from_error(
         exc: CopperbrainError,
-    ) -> tuple[FreeRoutingPassMetric, ...]:
-        raw = exc.error.details.get("freerouting_pass_metrics", ())
+    ) -> tuple[RoutingPassMetric, ...]:
+        raw = exc.error.details.get("routing_pass_metrics", ())
         if not isinstance(raw, (list, tuple)):
             return ()
-        metrics: list[FreeRoutingPassMetric] = []
+        metrics: list[RoutingPassMetric] = []
         for item in raw:
             try:
-                metrics.append(FreeRoutingPassMetric.model_validate(item))
+                metrics.append(RoutingPassMetric.model_validate(item))
             except (TypeError, ValueError):
                 continue
         return tuple(metrics)
 
     @staticmethod
-    def _freerouting_normalization_count_from_error(exc: CopperbrainError) -> int:
-        value = exc.error.details.get("freerouting_normalization_count", 0)
+    def _normalization_count_from_error(exc: CopperbrainError) -> int:
+        value = exc.error.details.get("normalization_count", 0)
         return value if isinstance(value, int) and value >= 0 else 0
 
     def _routing_configuration(
@@ -1106,9 +1106,11 @@ class PcbRoutingService:
             "via_drill_mm": request.via_drill_mm,
             "grid_mm": request.grid_mm,
             "allow_vias": request.allow_vias,
-            "max_passes": request.max_passes,
-            "semantic_stagnation_passes": request.semantic_stagnation_passes,
-            "thread_count": request.thread_count,
+            "max_iterations": request.max_iterations,
+            "max_probe_iterations": request.max_probe_iterations,
+            "heuristic_weight": request.heuristic_weight,
+            "via_cost": request.via_cost,
+            "max_ripup": request.max_ripup,
             "existing_copper_policy": request.existing_copper_policy,
             "maximum_autorouting_attempts": 3,
             "requested_candidate_count": request.candidate_count,
@@ -1120,21 +1122,13 @@ class PcbRoutingService:
         for attribute, name in (
             ("timeout_seconds", "wall_time_budget_seconds"),
             ("stall_seconds", "stall_time_budget_seconds"),
-            ("normalization_limit", "normalization_limit"),
         ):
             value = getattr(self.routing_backend, attribute, None)
             if isinstance(value, int | float) and not isinstance(value, bool):
                 configuration[name] = value
         if strategy is not None:
             configuration["attempt_configuration"] = strategy
-            configuration["freerouting_user_strategy"] = (
-                "prioritized" if strategy == "prioritized_single_thread" else strategy
-            )
-            configuration["effective_thread_count"] = (
-                1
-                if strategy == "prioritized_single_thread"
-                else request.thread_count or max(1, (os.cpu_count() or 2) - 1)
-            )
+            configuration["kicad_routing_tools_ordering"] = strategy
         return configuration
 
     def propose(self, session_id: str, request: RoutingRequest) -> RoutingPlan:
@@ -1153,7 +1147,7 @@ class PcbRoutingService:
         if request.existing_copper_policy == "reject" and (existing_segments or existing_vias):
             raise CopperbrainError(
                 ErrorCode.CONFLICT,
-                "Incremental FreeRouting is disabled for a board that already contains copper",
+                "Incremental autorouting is disabled for a board that already contains copper",
                 actionable_hint=(
                     "Route from the clean placed board, or explicitly use "
                     "existing_copper_policy='preserve' with watchdog protection."
@@ -1169,20 +1163,28 @@ class PcbRoutingService:
                 ErrorCode.INTEGRATION_UNAVAILABLE,
                 f"The selected {status.name} backend is unavailable",
                 actionable_hint=(
-                    "Install Java 25+ and a FreeRouting JAR, optionally set "
-                    "COPPERBRAIN_FREEROUTING_JAVA and COPPERBRAIN_FREEROUTING_JAR, "
+                    "Run 'uv run python scripts/setup_dependencies.py', or set "
+                    "COPPERBRAIN_KICAD_ROUTING_TOOLS_ROOT, "
                     "then restart Copperbrain."
                 ),
                 details={"reason": status.reason or "unknown"},
             )
         target_nets = tuple(sorted({item.net for item in analysis.unrouted_connections}))
+        excluded_plane_nets = request.excluded_plane_nets
+        if not excluded_plane_nets:
+            excluded_plane_nets = self.adapter.zone_net_names(pcb)
+        target_nets = tuple(net for net in target_nets if net not in excluded_plane_nets)
+        if not target_nets:
+            raise CopperbrainError(
+                ErrorCode.CONFLICT,
+                "No ordinary routing targets remain after reviewed plane-net exclusion",
+                details={"excluded_plane_nets": list(excluded_plane_nets)},
+            )
+        analysis = self.adapter.analyze_routing(pcb, session_id, target_nets)
         explicit_roles = self._rule_derived_roles(session, target_nets)
         explicit_roles.update(
             {net: role for net, role in request.net_roles.items() if net in target_nets}
         )
-        excluded_plane_nets = request.excluded_plane_nets
-        if not excluded_plane_nets:
-            excluded_plane_nets = self.adapter.zone_net_names(pcb)
         request = request.model_copy(
             update={
                 "nets": target_nets,
@@ -1210,7 +1212,6 @@ class PcbRoutingService:
         requested_net_role_counts = self._requested_net_role_counts(target_nets, explicit_roles)
         baseline_drc = self.drc_runner(pcb)
         project_fingerprint = hash_file(pcb)
-        recommended_max_passes = self.metrics.recommended_max_passes(project_fingerprint)
         routing_hotspots = self._routing_hotspots(parsed.pads, analysis)
         baseline_finished_at = utc_now()
         self.metrics.write(
@@ -1249,7 +1250,7 @@ class PcbRoutingService:
                 final_drc_warning_count=self._drc_warning_count(baseline_drc),
             )
         )
-        strategies = FreeRoutingAdapter.strategies(request)
+        strategies = self.routing_backend.strategies(request)
         evaluated: list[
             tuple[
                 tuple[int, int, int, int, float, int],
@@ -1264,7 +1265,9 @@ class PcbRoutingService:
         seed_only_candidate = False
         proposal_root = self.data_dir / "routing-proposals"
         proposal_root.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="freerouting-", dir=proposal_root) as directory:
+        with tempfile.TemporaryDirectory(
+            prefix="kicad-routing-tools-", dir=proposal_root
+        ) as directory:
             root = Path(directory)
             router_input = self._stage_router_input(
                 pcb,
@@ -1286,11 +1289,11 @@ class PcbRoutingService:
                 if seeded_analysis.complete:
                     self.routing_backend.refill_zones(router_input)
                     seeded_candidate = RoutedBoardCandidate(
-                        strategy="prioritized",
+                        strategy="mps",
                         pcb=router_input,
                         elapsed_seconds=0,
                     )
-                    strategies = ("prioritized",)
+                    strategies = ("mps",)
                     seed_only_candidate = True
             for strategy_index, strategy in enumerate(strategies):
                 candidate_started_at = utc_now()
@@ -1307,7 +1310,7 @@ class PcbRoutingService:
                     if not request.allow_vias and vias:
                         raise CopperbrainError(
                             ErrorCode.VALIDATION_FAILED,
-                            "FreeRouting used vias although this request forbids them",
+                            "KiCadRoutingTools used vias although this request forbids them",
                             details={"via_count": len(vias)},
                         )
                     routed_analysis = self.adapter.analyze_routing(
@@ -1349,8 +1352,8 @@ class PcbRoutingService:
                         fingerprint=fingerprint,
                         duplicate_of=duplicate_of,
                         backend_elapsed_seconds=candidate.elapsed_seconds,
-                        freerouting_pass_metrics=candidate.pass_metrics,
-                        freerouting_normalization_count=candidate.normalization_count,
+                        routing_pass_metrics=candidate.pass_metrics,
+                        normalization_count=candidate.normalization_count,
                         applicable=candidate.watchdog_reason is None,
                         diagnostic_only=candidate.watchdog_reason is not None,
                         failure_reason=candidate.watchdog_reason,
@@ -1436,8 +1439,8 @@ class PcbRoutingService:
                             baseline_drc_warning_count=self._drc_warning_count(baseline_drc),
                             final_drc_warning_count=self._drc_warning_count(candidate_drc),
                             new_drc_warning_count=new_warnings,
-                            freerouting_pass_metrics=candidate.pass_metrics,
-                            freerouting_normalization_count=candidate.normalization_count,
+                            routing_pass_metrics=candidate.pass_metrics,
+                            normalization_count=candidate.normalization_count,
                             best_pass_number=best_pass,
                             failed_route_count=failed_route_count,
                             stagnation_count=stagnation_count,
@@ -1457,12 +1460,12 @@ class PcbRoutingService:
                     pass_metrics = (
                         candidate.pass_metrics
                         if candidate is not None
-                        else self._freerouting_metrics_from_error(exc)
+                        else self._routing_metrics_from_error(exc)
                     )
                     normalization_count = (
                         candidate.normalization_count
                         if candidate is not None
-                        else self._freerouting_normalization_count_from_error(exc)
+                        else self._normalization_count_from_error(exc)
                     )
                     candidate_finished_at = utc_now()
                     (
@@ -1508,8 +1511,8 @@ class PcbRoutingService:
                                 if "watchdog" in exc.error.details
                                 else None
                             ),
-                            freerouting_pass_metrics=pass_metrics,
-                            freerouting_normalization_count=normalization_count,
+                            routing_pass_metrics=pass_metrics,
+                            normalization_count=normalization_count,
                             best_pass_number=best_pass,
                             failed_route_count=failed_route_count,
                             stagnation_count=stagnation_count,
@@ -1539,8 +1542,8 @@ class PcbRoutingService:
                                 f"{run_id}:{strategy}:diagnostic".encode()
                             ).hexdigest(),
                             backend_elapsed_seconds=time.monotonic() - candidate_started,
-                            freerouting_pass_metrics=pass_metrics,
-                            freerouting_normalization_count=normalization_count,
+                            routing_pass_metrics=pass_metrics,
+                            normalization_count=normalization_count,
                             applicable=False,
                             diagnostic_only=True,
                             failure_reason=str(exc),
@@ -1554,7 +1557,7 @@ class PcbRoutingService:
         if not evaluated:
             raise CopperbrainError(
                 ErrorCode.VALIDATION_FAILED,
-                "FreeRouting produced no usable routing candidate",
+                "KiCadRoutingTools produced no usable routing candidate",
                 actionable_hint="Review placement and design rules, then retry.",
                 details={
                     "failures": failures,
@@ -1563,7 +1566,6 @@ class PcbRoutingService:
                     ],
                     "routing_hotspots": [item.model_dump(mode="json") for item in routing_hotspots],
                     "placement_rework_recommended": bool(routing_hotspots),
-                    "recommended_max_passes": recommended_max_passes,
                     "metrics_run_id": run_id,
                 },
             )
@@ -1581,21 +1583,20 @@ class PcbRoutingService:
             target_nets=target_nets,
             analysis_before=analysis,
             predicted_complete=selected.complete,
-            backend="freerouting",
+            backend="kicad_routing_tools",
             backend_version=status.version,
             metrics_run_id=run_id,
             candidate_evaluations=evaluations,
             routing_hotspots=routing_hotspots,
             placement_rework_recommended=bool(routing_hotspots),
-            recommended_max_passes=recommended_max_passes,
             evidence=(
                 (
                     "Copper geometry was completed by explicitly supplied typed seeds and/or "
                     "enabled geometry-derived fine-pitch escapes before a router process "
                     "was needed"
                     if seed_only_candidate
-                    else "Copper geometry was generated by a local FreeRouting process through "
-                    "KiCad's official Specctra DSN/SES bridge"
+                    else "Copper geometry was generated by the managed local "
+                    "KiCadRoutingTools Rust-accelerated A* backend"
                 ),
                 f"Evaluated {len(evaluations)} deterministic candidate configuration(s)",
                 "Autorouting stopped after the configured candidates, with a hard maximum of "
@@ -1605,7 +1606,8 @@ class PcbRoutingService:
                 f"{selected.via_count} vias, {selected.track_length_mm:g} mm routed length",
             ),
             assumptions=(
-                "FreeRouting consumes the netclasses and board rules serialized by KiCad",
+                "KiCadRoutingTools consumes the reviewed widths, clearances, vias, and board "
+                "geometry supplied by Copperbrain",
                 "The selected candidate is still subject to the authoritative prepared-workspace "
                 "connectivity and comparative KiCad DRC gates",
                 "Only the selected candidate is applied to the prepared PCB; final acceptance "

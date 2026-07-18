@@ -10,9 +10,9 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import TypeAdapter
 
 from copperbrain.adapters.downloads import DownloadAdapter
-from copperbrain.adapters.freerouting import FreeRoutingAdapter
 from copperbrain.adapters.jlc_catalog import configured_catalog
 from copperbrain.adapters.kicad_detection import detect_kicad as detect_kicad_service
+from copperbrain.adapters.kicad_routing_tools import KiCadRoutingToolsAdapter
 from copperbrain.config import Settings
 from copperbrain.errors import CopperbrainError
 from copperbrain.models import (
@@ -67,13 +67,12 @@ sourcing = SourcingService(
 )
 changes = ChangeService(projects, settings.data_dir)
 pcb_rules = PcbRuleService(projects, settings.data_dir)
-routing_backend = FreeRoutingAdapter.discover(
+routing_backend = KiCadRoutingToolsAdapter.discover(
     settings.data_dir,
-    explicit_jar=settings.freerouting_jar,
-    explicit_java=settings.freerouting_java,
-    timeout_seconds=settings.freerouting_timeout_seconds,
-    stall_seconds=settings.freerouting_stall_seconds,
-    normalization_limit=settings.freerouting_normalization_limit,
+    explicit_root=settings.kicad_routing_tools_root,
+    explicit_python=settings.kicad_routing_tools_python,
+    timeout_seconds=settings.routing_timeout_seconds,
+    stall_seconds=settings.routing_stall_seconds,
 )
 pcb_design = PcbDesignService(
     projects, settings.data_dir, zone_refiller=routing_backend.refill_zones
@@ -445,7 +444,7 @@ def export_pcb_preview(session_id: str) -> dict[str, object]:
 
 @mcp.tool()
 def get_routing_backend_status() -> dict[str, object]:
-    """Report local Java, FreeRouting JAR, and KiCad Python bridge availability."""
+    """Report managed KiCadRoutingTools, Rust core, and KiCad bridge availability."""
     return pcb_routing.backend_status().model_dump(mode="json")
 
 

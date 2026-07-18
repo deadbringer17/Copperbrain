@@ -10,6 +10,9 @@ dependencies = [
   "pydantic>=2.10,<3",
   "platformdirs>=4.3,<5",
   "kicad-python>=0.5,<1",
+  "numpy>=1.26,<3",
+  "scipy>=1.12,<2",
+  "shapely>=2,<3",
 ]
 
 [project.optional-dependencies]

@@ -19,7 +19,7 @@ Copperbrain is a local MCP server that gives an AI agent structured, typed hands
 - search, filter, and rank real JLCPCB/LCSC candidates by stock, price break, and Basic/Extended status, then import the winning symbol, footprint, 3D model, and datasheet;
 - propose a schematic change as a typed diff, show a PDF preview, run ERC before and after, and only mutate the real file after I explicitly confirm it;
 - generate a BOM with LCSC/MPN metadata and priced cost estimates at multiple quantities;
-- move into the PCB itself: propose manufacturing-aware design rules, analyze and optimize component placement, build ground planes from typed domain definitions, and hand a bounded net set to FreeRouting for controlled, evidence-ranked routing;
+- move into the PCB itself: propose manufacturing-aware design rules, analyze and optimize component placement, build ground planes from typed domain definitions, and hand a bounded net set to KiCadRoutingTools for controlled, evidence-ranked routing;
 - roll back any of the above, byte-for-byte, at any point.
 
 Nothing here is unbounded circuit generation. Copperbrain refuses to guess at current, voltage, or impedance intent it wasn't given, and it will not claim a board is "production ready" while thermal, EMC, SI/PI, DFM, or stackup review is still outstanding — because I know from professional practice that's exactly the corner an automated tool is tempted to cut silently.
@@ -32,7 +32,7 @@ Under the services sit adapters I treat as swappable and optional, detected at r
 
 - `kicad-sch-api` for schematic reads/writes, `kicad-cli` for ERC/DRC, and the official `pcbnew`/`kicad-python` IPC binding for anything that needs to transform pads, footprints, and 3D models together (side flips, rotations);
 - a JLCImport/JLCPCB Tools adapter for component search, pricing, and BOM enrichment;
-- FreeRouting, driven headless through KiCad's own Specctra DSN/SES export-import round trip, with my own ranking layer on top of its candidates.
+- KiCadRoutingTools, driven headlessly through a fixed Python CLI and Rust-accelerated A* core, with my own scope, delta-validation, watchdog, and ranking layer around its candidates.
 
 Every mutation — schematic patch, rule change, placement move, grounding pass, routing batch, even brand-new project creation — goes through the same private-workspace-first pipeline: copy, mutate, comparative ERC/DRC, PDF preview, source-hash check, explicit confirmation, atomic apply, restorable snapshot. Working alone against the clock, I used that one pipeline as leverage: build it once, correctly, and every new capability (rules, placement, grounding, routing) became "one more typed operation behind the same gate" instead of a new class of risk. I proved it end to end on three real reference boards built in three days: a 12 V/20 A brushed-DC H-bridge driver, a compact DRV8311S three-phase BLDC driver, and a 12 V→48 V boost converter — the kind of boards I'd normally lay out by hand on the job.
 
@@ -46,10 +46,10 @@ where $I$ is current in amps, $\Delta T$ the allowed temperature rise in °C, $A
 
 ## Challenges I ran into
 
-- **FreeRouting's `-inc` flag lies.** The upstream 2.2.4 CLI parses a scoped/incremental net-selection flag but never propagates it to the headless board, so a "route only these three nets" request could silently touch everything. I ended up requiring a hash-bound capability record proving a given FreeRouting JAR actually honors net exclusion before Copperbrain will run a scoped job at all — otherwise it refuses before Java even starts.
+- **Router scope must be independently enforced.** Copperbrain materializes a nonempty reviewed net set, supplies it through fixed KiCadRoutingTools `--nets` arguments, never enables ripping of pre-existing routes, then independently rejects removed copper or any new copper outside the selected set.
 - **Ground is not one net.** Splitting `PGND` and `GND` into distinct shaped regions that never short together, connected only through explicitly reviewed two-terminal bridges, took more modeling time than the routing logic itself — you can't infer a DC bridge just because a two-pin part happens to touch both planes, and I've seen what happens on a real board when that assumption is wrong.
-- **Autorouters lie to themselves too.** FreeRouting can spin for a long time without making progress. I had to build a stagnation/stall watchdog that kills the process tree and reports *why* it stopped, rather than trusting a naive timeout or, worse, accepting a partial run as "done."
-- **Keeping the model honest under my own time pressure.** Solo, three days, a benchmark board not routing cleanly at 1 a.m. — it's tempting to let the model widen a clearance or shrink a trace just to get FreeRouting to finish. I hard-blocked that path: constraints are typed inputs I supply as the engineer, not levers the model can pull to make its own life easier.
+- **Autorouters lie to themselves too.** A router can stay alive without producing useful progress. I built wall-time and output-stall watchdogs that kill the complete process tree and report *why* it stopped, rather than trusting a naive timeout or accepting a partial run as "done."
+- **Keeping the model honest under my own time pressure.** Solo, three days, a benchmark board not routing cleanly at 1 a.m. — it's tempting to let the model widen a clearance or shrink a trace just to get the router to finish. I hard-blocked that path: constraints are typed inputs I supply as the engineer, not levers the model can pull to make its own life easier.
 
 ## Accomplishments that I'm proud of
 
@@ -60,7 +60,7 @@ where $I$ is current in amps, $\Delta T$ the allowed temperature rise in °C, $A
 
 ## What I learned
 
-The hard part of "AI for hardware design" was never getting a model to propose a circuit — it's building the evidence and refusal machinery that knows when *not* to trust that proposal. That's a professional-engineering problem before it's a software one, and having spent years on the other side of a bad autorouter run or a "quick" manual PCB edit is what told me exactly which gates couldn't be optional. Typed contracts at the MCP boundary, deterministic scoring instead of LLM judgment for anything DRC- or connectivity-relevant, and a confirmation gate that can't be bypassed turned out to be what makes the AI layer trustworthy enough to be worth having at all. I also learned, the expensive way and alone, that every "it just needs one more automation layer" moment (the FreeRouting flag, the autorouter stall) is exactly where a silent failure would have hidden inside a demo that looked fine on camera.
+The hard part of "AI for hardware design" was never getting a model to propose a circuit — it's building the evidence and refusal machinery that knows when *not* to trust that proposal. That's a professional-engineering problem before it's a software one, and having spent years on the other side of a bad autorouter run or a "quick" manual PCB edit is what told me exactly which gates couldn't be optional. Typed contracts at the MCP boundary, deterministic scoring instead of LLM judgment for anything DRC- or connectivity-relevant, and a confirmation gate that can't be bypassed turned out to be what makes the AI layer trustworthy enough to be worth having at all. I also learned, the expensive way and alone, that every "it just needs one more automation layer" moment (router scope, process stalls, or output import) is exactly where a silent failure would have hidden inside a demo that looked fine on camera.
 
 ## What's next for Copperbrain
 

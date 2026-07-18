@@ -11,10 +11,10 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from copperbrain.adapters.freerouting import RoutingBackend
 from copperbrain.adapters.kicad_cli import export_pcb_pdf, run_drc
 from copperbrain.adapters.kicad_detection import detect_kicad
 from copperbrain.adapters.pcb_design import PcbFileAdapter
+from copperbrain.adapters.routing_backend import RoutingBackend
 from copperbrain.errors import CopperbrainError
 from copperbrain.models import (
     ChangeStatus,

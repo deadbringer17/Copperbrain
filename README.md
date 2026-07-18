@@ -10,13 +10,15 @@ See this README for scope and public contracts, `docs/INSTALLATION.md` for setup
 ## Installation
 
 Requires Windows, Python 3.11 or newer, `uv`, and KiCad 10.x (`kicad-cli.exe` is discovered
-dynamically). Java 25+ and a local FreeRouting JAR are required only for controlled PCB routing;
-JLCImport and JLCPCB Tools are optional and enable local component sourcing.
+dynamically). Controlled PCB routing uses a managed KiCadRoutingTools runtime with its
+platform-specific Rust core; JLCImport and JLCPCB Tools are optional and enable local component
+sourcing.
 
 ```powershell
 git clone https://github.com/deadbringer17/Copperbrain.git
 cd Copperbrain
 uv sync --all-extras
+uv run python scripts/setup_dependencies.py --skip-jlc-plugins
 uv run pytest
 ```
 
@@ -36,7 +38,7 @@ applies a Git fast-forward only. It refuses dirty worktrees, detached or differe
 unexpected remotes, and divergent history; it never stashes, resets, rebases, or discards local
 work. Restart Codex or open a new task after a successful update.
 
-To fetch the optional runtime integrations (Java, FreeRouting, JLCImport, JLCPCB Tools)
+To fetch the pinned, hash-verified KiCadRoutingTools runtime and optional JLCImport/JLCPCB Tools integrations
 automatically instead of installing them by hand, run:
 
 ```powershell
@@ -244,27 +246,25 @@ explicitly blocked by readiness evidence rather than being silently inferred.
 After rules and placement/grounding intent are reviewed, use `analyze_unrouted_nets`
 to identify the remaining disconnected pad groups. Ground-zone connectivity is included, so the
 router does not redundantly route pads already joined by an applied plane. Check
-`get_routing_backend_status`, then call `propose_pcb_routing`. FreeRouting consumes KiCad's
-official Specctra DSN and runs at most three isolated attempts: prioritized, sequential, and a
-single-thread prioritized configuration. Three attempts are used by default and a request for a
-fourth is rejected. Copperbrain ranks the candidates by completion, new DRC errors, open
-connections, vias, and routed length. Only the selected
-candidate's copper delta becomes typed segments and vias; there is no internal routing fallback.
-Reviewed grounding domains are omitted only from FreeRouting's private DSN input so plane copper
-does not obstruct signal search. Their exact netlist remains present, and the selected typed copper
-is applied to the already-grounded private board, followed by KiCad zone refill and comparative DRC.
+`get_routing_backend_status`, then call `propose_pcb_routing`. KiCadRoutingTools runs locally through
+its Python CLI and Rust-accelerated A* core. Copperbrain can run at most three isolated ordering
+strategies: `mps`, `inside_out`, and `original`. One candidate is used by default and a request for
+a fourth is rejected. Copperbrain ranks candidates by completion, new DRC errors, open connections,
+vias, and routed length. Only the selected candidate's copper delta becomes typed segments and vias;
+there is no internal routing fallback. Reviewed planes remain on the private input board as copper
+obstacles, while their nets are excluded from the explicit signal-routing batch. The selected typed
+copper is applied to the already-grounded private board, followed by KiCad zone refill and
+comparative DRC.
 Fine-pitch escape geometry is opt-in per routing batch. When enabled, Copperbrain derives short
 typed stubs from pad and courtyard geometry and, for a nearby opposite-side target, a clearance-
 offset dogbone via with an outside-courtyard approach. It includes these seeds in the private router
 input and subjects the resulting complete copper delta to the same scope, preservation,
 connectivity, and DRC gates.
-When `nets` is empty, Copperbrain materializes the exact currently-unrouted net set before DSN
-export. FreeRouting retains non-target net and plane geometry but moves those nets into generated
-preserve classes during scope validation. The upstream FreeRouting 2.2.4 CLI parses `-inc` but does
-not propagate it to the loaded headless board; Copperbrain therefore refuses a scoped run before
-Java starts unless the selected JAR has a hash-bound capability record proving that headless class
-exclusion works. Every imported result is rejected if it removes existing copper or adds copper
-outside the requested net set.
+When `nets` is empty, Copperbrain materializes the exact currently-unrouted net set before starting
+the backend. KiCadRoutingTools receives those exact names through its fixed `--nets` argument;
+non-target nets, existing routes, planes, keepouts, pads, and the board outline remain obstacles.
+Copperbrain never enables the backend option that permits ripping pre-existing routes. Every result
+is rejected if it removes existing copper or adds copper outside the requested net set.
 
 Pass the reviewed routing requests with placement and grounding to `prepare_pcb_acceptance`.
 Copperbrain stops after the bounded candidate comparison, applies only the best candidate to the
@@ -275,18 +275,17 @@ user. Only the complete aggregate publishes
 `copperbrain-output/previews/pcb/` and can be applied by `accept_pcb` with the third acceptance and
 a closed editor. The KiCad Project Manager may remain open; only a PCB-document lock blocks the
 aggregate apply/rollback. Boards containing pre-existing copper are rejected by default; explicitly select the
-`preserve` policy only for intentional incremental routing. A wall-time/stall watchdog also stops
-known FreeRouting normalization loops and cleans up the Java process tree.
-Specctra coordinate round trips are matched with a 1 um tolerance when proving that existing copper
-was preserved; the typed delta is still applied to the original-precision project copy.
+`preserve` policy only for intentional incremental routing. Wall-time and output-stall watchdogs
+stop the complete router process tree. The typed delta is always applied to the original-precision
+project copy.
 Each proposal writes versioned baseline and per-candidate JSON metrics below the private
-`COPPERBRAIN_DATA_DIR/metrics/connectivity/` tree. FreeRouting progress records retain bounded
-per-pass board totals, actual queued items, failures, duration, score, CPU, allocated memory, and
-normalization evidence. The returned
+`COPPERBRAIN_DATA_DIR/metrics/connectivity/` tree. KiCadRoutingTools attempt records retain bounded
+queued/routed/failure counts, duration, routed copper, watchdog evidence, and resource data when the
+backend exposes it. Backend output is bounded and sensitive net names are replaced with hashes. The returned
 `RoutingPlan.metrics_run_id` correlates those records with preview, apply, and recovery.
 Call `get_connectivity_metrics` with that ID for a bounded, sanitized optimization view including
 the best observed pass, connection delta, failed-candidate count, stagnation, and watchdog causes.
-New records use schema 4 while the reader remains compatible with persisted schema-2 records.
+New records use schema 5 while the reader remains compatible with persisted schema-2 records.
 
 For the compact end-to-end surface, call `prepare_pcb_acceptance`, review its preview, then use
 `validate_pcb_acceptance` and `accept_pcb`. `assess_pcb_readiness` intentionally keeps

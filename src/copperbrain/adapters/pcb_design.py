@@ -536,7 +536,7 @@ class PcbFileAdapter:
                 )
             rounded_start = (round(start[0], 6), round(start[1], 6))
             rounded_end = (round(end[0], 6), round(end[1], 6))
-            # FreeRouting may emit a zero-length segment for multiple logical
+            # External routers may emit a zero-length segment for multiple logical
             # pads that share the same physical copper position (common on
             # USB-C receptacles). It carries no copper and must not become a
             # typed routing operation.
@@ -706,7 +706,7 @@ class PcbFileAdapter:
             return True
 
         # Copper segments of the same net and layer connect at endpoints, crossings, and
-        # T-junctions. FreeRouting commonly emits a junction on the interior of another segment.
+        # T-junctions can place a junction on the interior of another segment.
         for index, segment_left in enumerate(segment_items):
             for segment_right in segment_items[index + 1 :]:
                 if segment_left[0] != segment_right[0] or segment_left[1] != segment_right[1]:

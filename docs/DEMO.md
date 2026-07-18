@@ -31,7 +31,7 @@ For the bounded motor benchmark, prepare `motor_driver_bench_operations`, then p
 set from `motor_driver_bench_manufacturing_profile` and
 `motor_driver_bench_rule_requirements`, and initialize the empty PCB with
 `motor_driver_bench_layout_plan`. Review both PDFs and the 20 A/2 oz assumptions before any apply.
-The reference intentionally leaves routing open if FreeRouting cannot satisfy the reviewed rules;
+The reference intentionally leaves routing open if KiCadRoutingTools cannot satisfy the reviewed rules;
 never reduce the current constraint merely to obtain a complete candidate.
 
 To demonstrate the PCB-rule extension:
@@ -48,12 +48,12 @@ The extension configures routing constraints only. It neither routes nor rewrite
 
 To demonstrate controlled PCB routing after rules and placement are ready:
 
-1. call `get_routing_backend_status` and verify Java 25+, FreeRouting, KiCad Python, and
-   `scoped_routing_supported=true` for a subset run;
+1. call `get_routing_backend_status` and verify the managed KiCadRoutingTools release, Python
+   interpreter, platform Rust core, KiCad Python bridge, and scoped routing support;
 2. call `analyze_unrouted_nets` and review the disconnected pad groups;
 3. call `propose_pcb_routing` with exact nets or an empty list for every routable net, then compare
    completion, DRC regression, open-connection, via, length, and per-pass work-queue metrics for the candidates; a
-   non-empty list is enforced in the exported DSN so unrelated nets are not routed silently;
+   non-empty list is passed through fixed `--nets` arguments so unrelated nets are not routed;
 4. combine the reviewed routing requests with placement and grounding in `prepare_pcb_acceptance`;
 5. inspect its
    single preview, and rerun `validate_pcb_acceptance`;
