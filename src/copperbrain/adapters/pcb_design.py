@@ -477,6 +477,25 @@ class PcbFileAdapter:
                 layers.add(layer)
         return tuple(sorted(layers))
 
+    def zone_net_names(self, pcb: Path) -> tuple[str, ...]:
+        """Return sorted net names that own at least one copper zone on the board."""
+        parsed = self.parse(pcb)
+        code_to_name = {item.code: item.net for item in parsed.nets.values()}
+        names: set[str] = set()
+        for zone in parsed.zones:
+            named = _first(zone, "net_name")
+            net_form = _first(zone, "net")
+            resolved = (
+                str(named[1])
+                if named is not None and len(named) > 1
+                else _resolve_net_name(net_form[1], code_to_name)
+                if net_form is not None and len(net_form) > 1
+                else None
+            )
+            if resolved and _layer(zone) in parsed.copper_layers:
+                names.add(resolved)
+        return tuple(sorted(names))
+
     def copper_layers(self, pcb: Path) -> tuple[str, ...]:
         """Return enabled copper layers in board stack order."""
         return self.parse(pcb).copper_layers
@@ -515,13 +534,21 @@ class PcbFileAdapter:
                     "Controlled routing encountered a segment on a disabled copper layer",
                     details={"layer": layer},
                 )
+            rounded_start = (round(start[0], 6), round(start[1], 6))
+            rounded_end = (round(end[0], 6), round(end[1], 6))
+            # FreeRouting may emit a zero-length segment for multiple logical
+            # pads that share the same physical copper position (common on
+            # USB-C receptacles). It carries no copper and must not become a
+            # typed routing operation.
+            if rounded_start == rounded_end:
+                continue
             segments.append(
                 RouteSegment(
                     net=net,
-                    start_x_mm=round(start[0], 6),
-                    start_y_mm=round(start[1], 6),
-                    end_x_mm=round(end[0], 6),
-                    end_y_mm=round(end[1], 6),
+                    start_x_mm=rounded_start[0],
+                    start_y_mm=rounded_start[1],
+                    end_x_mm=rounded_end[0],
+                    end_y_mm=rounded_end[1],
                     width_mm=_number(width[1]) if width and len(width) > 1 else 0.25,
                     layer=layer,
                 )

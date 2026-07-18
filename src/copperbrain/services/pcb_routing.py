@@ -18,7 +18,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from copperbrain.adapters.freerouting import FreeRoutingAdapter, RoutingBackend
+from copperbrain.adapters.freerouting import (
+    FreeRoutingAdapter,
+    RoutedBoardCandidate,
+    RoutingBackend,
+    RoutingStrategy,
+)
 from copperbrain.adapters.kicad_cli import export_pcb_pdf, run_drc
 from copperbrain.adapters.kicad_detection import detect_kicad
 from copperbrain.adapters.pcb_design import PcbFileAdapter
@@ -517,8 +522,14 @@ class PcbRoutingService:
         *,
         context_pcb: Path | None = None,
         add_escape_stubs: bool = False,
+        default_width_mm: float | None = None,
+        default_clearance_mm: float = 0.2,
+        via_diameter_mm: float = 0.6,
+        via_drill_mm: float = 0.3,
+        seed_segments: tuple[RouteSegment, ...] = (),
+        seed_vias: tuple[RouteVia, ...] = (),
     ) -> Path:
-        """Stage preferred netclasses and deterministic fine-pitch escape stubs."""
+        """Stage preferred netclasses and deterministic fine-pitch escape geometry."""
         workspace.mkdir(parents=True, exist_ok=False)
         context = context_pcb or pcb
         staged_pcb = workspace / context.name
@@ -541,12 +552,16 @@ class PcbRoutingService:
             for net, netclass in net_classes.items()
             if netclass in preferred_classes
         }
+        if default_width_mm is not None:
+            for net in target_nets:
+                net_widths.setdefault(net, default_width_mm)
         if not fanout_limits or not net_widths:
             return staged_pcb
 
         parsed = self.adapter.parse(staged_pcb)
         bounds_by_reference = {item.reference: item.bounds for item in parsed.summary.footprints}
         stubs: list[RouteSegment] = []
+        escape_vias: list[RouteVia] = []
         fine_pads: list[tuple[PcbPadInspection, float, tuple[float, float]]] = []
         for pad in parsed.pads:
             preferred = net_widths.get(pad.net)
@@ -568,7 +583,7 @@ class PcbRoutingService:
                 ),
                 6,
             )
-            if pad_limit >= preferred:
+            if pad_limit >= preferred and not add_escape_stubs:
                 continue
             center_x = (bounds.min_x_mm + bounds.max_x_mm) / 2
             center_y = (bounds.min_y_mm + bounds.max_y_mm) / 2
@@ -591,24 +606,15 @@ class PcbRoutingService:
                 continue
             escape = (round(end_x, 6), round(end_y, 6))
             fine_pads.append((pad, pad_limit, escape))
-            if add_escape_stubs:
-                stubs.append(
-                    RouteSegment(
-                        net=pad.net,
-                        start_x_mm=pad.x_mm,
-                        start_y_mm=pad.y_mm,
-                        end_x_mm=escape[0],
-                        end_y_mm=escape[1],
-                        width_mm=pad_limit,
-                        layer=pad.layers[0],
-                    )
-                )
+        seeded_pad_keys: set[tuple[str, str, str, str]] = set()
         for index, (left_pad, left_width, _) in enumerate(fine_pads):
             for right_pad, right_width, _ in fine_pads[index + 1 :]:
                 if (
-                    left_pad.reference != right_pad.reference
+                    not add_escape_stubs
+                    or left_pad.reference != right_pad.reference
                     or left_pad.net != right_pad.net
                     or left_pad.layers[0] != right_pad.layers[0]
+                    or (left_pad.x_mm, left_pad.y_mm) == (right_pad.x_mm, right_pad.y_mm)
                     or math.dist(
                         (left_pad.x_mm, left_pad.y_mm),
                         (right_pad.x_mm, right_pad.y_mm),
@@ -627,6 +633,12 @@ class PcbRoutingService:
                         layer=left_pad.layers[0],
                     )
                 )
+                seeded_pad_keys.add(
+                    (left_pad.reference, left_pad.number, left_pad.net, left_pad.layers[0])
+                )
+                seeded_pad_keys.add(
+                    (right_pad.reference, right_pad.number, right_pad.net, right_pad.layers[0])
+                )
         groups: dict[
             tuple[str, str, str],
             list[tuple[PcbPadInspection, float, tuple[float, float]]],
@@ -635,7 +647,7 @@ class PcbRoutingService:
             pad = item[0]
             groups.setdefault((pad.reference, pad.net, pad.layers[0]), []).append(item)
         for (reference, net, layer), group in groups.items():
-            if net_widths.get(net, 0) < 1.0:
+            if not add_escape_stubs and net_widths.get(net, 0) < 1.0:
                 continue
             nearby: list[
                 tuple[
@@ -661,6 +673,148 @@ class PcbRoutingService:
                     if distance <= 5.0:
                         nearby.append((distance, pad, width, escape, target))
             if not nearby:
+                opposite_layer: list[
+                    tuple[
+                        float,
+                        PcbPadInspection,
+                        float,
+                        tuple[float, float],
+                        PcbPadInspection,
+                    ]
+                ] = []
+                if add_escape_stubs:
+                    for pad, width, escape in group:
+                        for target in parsed.pads:
+                            if (
+                                target.reference == reference
+                                or target.net != net
+                                or layer in target.layers
+                            ):
+                                continue
+                            distance = math.dist(
+                                (pad.x_mm, pad.y_mm),
+                                (target.x_mm, target.y_mm),
+                            )
+                            if distance <= 10.0:
+                                opposite_layer.append((distance, pad, width, escape, target))
+                if not opposite_layer:
+                    continue
+                _, pad, width, escape, target = min(
+                    opposite_layer,
+                    key=lambda item: (
+                        item[0],
+                        item[1].number,
+                        item[4].reference,
+                        item[4].number,
+                    ),
+                )
+                delta_x = escape[0] - pad.x_mm
+                delta_y = escape[1] - pad.y_mm
+                length = math.hypot(delta_x, delta_y)
+                if length <= 1e-9:
+                    continue
+                via_offset = via_diameter_mm / 2 + default_clearance_mm
+                via_x = round(escape[0] + delta_x / length * via_offset, 6)
+                via_y = round(escape[1] + delta_y / length * via_offset, 6)
+                target_layer = target.layers[0]
+                connection_width = round(
+                    min(
+                        net_widths[net],
+                        min(target.width_mm, target.height_mm) * 0.8,
+                    ),
+                    6,
+                )
+                target_bounds = bounds_by_reference.get(target.reference)
+                target_escape = (target.x_mm, target.y_mm)
+                if target_bounds is not None:
+                    target_center_x = (target_bounds.min_x_mm + target_bounds.max_x_mm) / 2
+                    target_center_y = (target_bounds.min_y_mm + target_bounds.max_y_mm) / 2
+                    target_horizontal = abs(target.x_mm - target_center_x) / max(
+                        (target_bounds.max_x_mm - target_bounds.min_x_mm) / 2,
+                        1e-9,
+                    )
+                    target_vertical = abs(target.y_mm - target_center_y) / max(
+                        (target_bounds.max_y_mm - target_bounds.min_y_mm) / 2,
+                        1e-9,
+                    )
+                    target_margin = connection_width / 2 + 0.01
+                    if target_horizontal >= target_vertical:
+                        target_escape = (
+                            target_bounds.max_x_mm + target_margin
+                            if target.x_mm >= target_center_x
+                            else target_bounds.min_x_mm - target_margin,
+                            target.y_mm,
+                        )
+                    else:
+                        target_escape = (
+                            target.x_mm,
+                            target_bounds.max_y_mm + target_margin
+                            if target.y_mm >= target_center_y
+                            else target_bounds.min_y_mm - target_margin,
+                        )
+                    target_escape = (
+                        round(target_escape[0], 6),
+                        round(target_escape[1], 6),
+                    )
+                stubs.append(
+                    RouteSegment(
+                        net=net,
+                        start_x_mm=pad.x_mm,
+                        start_y_mm=pad.y_mm,
+                        end_x_mm=via_x,
+                        end_y_mm=via_y,
+                        width_mm=width,
+                        layer=layer,
+                    )
+                )
+                dogleg = (target_escape[0], via_y)
+                if (via_x, via_y) != dogleg:
+                    stubs.append(
+                        RouteSegment(
+                            net=net,
+                            start_x_mm=via_x,
+                            start_y_mm=via_y,
+                            end_x_mm=dogleg[0],
+                            end_y_mm=dogleg[1],
+                            width_mm=connection_width,
+                            layer=target_layer,
+                        )
+                    )
+                if dogleg != target_escape:
+                    stubs.append(
+                        RouteSegment(
+                            net=net,
+                            start_x_mm=dogleg[0],
+                            start_y_mm=dogleg[1],
+                            end_x_mm=target_escape[0],
+                            end_y_mm=target_escape[1],
+                            width_mm=connection_width,
+                            layer=target_layer,
+                        )
+                    )
+                if target_escape != (target.x_mm, target.y_mm):
+                    stubs.append(
+                        RouteSegment(
+                            net=net,
+                            start_x_mm=target_escape[0],
+                            start_y_mm=target_escape[1],
+                            end_x_mm=target.x_mm,
+                            end_y_mm=target.y_mm,
+                            width_mm=connection_width,
+                            layer=target_layer,
+                        )
+                    )
+                escape_vias.append(
+                    RouteVia(
+                        net=net,
+                        x_mm=via_x,
+                        y_mm=via_y,
+                        diameter_mm=via_diameter_mm,
+                        drill_mm=via_drill_mm,
+                        layers=(layer, target_layer),
+                    )
+                )
+                seeded_pad_keys.add((pad.reference, pad.number, pad.net, layer))
                 continue
             _, pad, width, escape, target = min(
                 nearby,
@@ -671,8 +825,40 @@ class PcbRoutingService:
                     item[4].number,
                 ),
             )
-            stubs.extend(
-                (
+            connection_width = round(
+                min(
+                    net_widths[net],
+                    min(target.width_mm, target.height_mm) * 0.8,
+                ),
+                6,
+            )
+            if add_escape_stubs:
+                connection_stubs = [
+                    RouteSegment(
+                        net=net,
+                        start_x_mm=pad.x_mm,
+                        start_y_mm=pad.y_mm,
+                        end_x_mm=target.x_mm,
+                        end_y_mm=target.y_mm,
+                        width_mm=min(width, connection_width),
+                        layer=layer,
+                    )
+                ]
+                seeded_pad_keys.add((pad.reference, pad.number, pad.net, layer))
+            else:
+                connection_stubs = [
+                    RouteSegment(
+                        net=net,
+                        start_x_mm=escape[0],
+                        start_y_mm=escape[1],
+                        end_x_mm=target.x_mm,
+                        end_y_mm=target.y_mm,
+                        width_mm=connection_width,
+                        layer=layer,
+                    )
+                ]
+                connection_stubs.insert(
+                    0,
                     RouteSegment(
                         net=net,
                         start_x_mm=pad.x_mm,
@@ -682,25 +868,28 @@ class PcbRoutingService:
                         width_mm=width,
                         layer=layer,
                     ),
-                    RouteSegment(
-                        net=net,
-                        start_x_mm=escape[0],
-                        start_y_mm=escape[1],
-                        end_x_mm=target.x_mm,
-                        end_y_mm=target.y_mm,
-                        width_mm=round(
-                            min(
-                                net_widths[net],
-                                min(target.width_mm, target.height_mm) * 0.8,
-                            ),
-                            6,
-                        ),
-                        layer=layer,
-                    ),
                 )
-            )
-        if stubs:
-            self.adapter.apply_routing(staged_pcb, tuple(stubs), ())
+            stubs.extend(connection_stubs)
+        if add_escape_stubs:
+            for pad, width, escape in fine_pads:
+                key = (pad.reference, pad.number, pad.net, pad.layers[0])
+                if key in seeded_pad_keys:
+                    continue
+                stubs.append(
+                    RouteSegment(
+                        net=pad.net,
+                        start_x_mm=pad.x_mm,
+                        start_y_mm=pad.y_mm,
+                        end_x_mm=escape[0],
+                        end_y_mm=escape[1],
+                        width_mm=width,
+                        layer=pad.layers[0],
+                    )
+                )
+        staged_segments = (*seed_segments, *stubs)
+        staged_vias = (*seed_vias, *escape_vias)
+        if staged_segments or staged_vias:
+            self.adapter.apply_routing(staged_pcb, staged_segments, staged_vias)
         return staged_pcb
 
     @staticmethod
@@ -905,7 +1094,9 @@ class PcbRoutingService:
         return value if isinstance(value, int) and value >= 0 else 0
 
     def _routing_configuration(
-        self, request: RoutingRequest
+        self,
+        request: RoutingRequest,
+        strategy: RoutingStrategy | None = None,
     ) -> dict[str, str | int | float | bool]:
         configuration: dict[str, str | int | float | bool] = {
             "preferred_layer": request.preferred_layer,
@@ -919,6 +1110,12 @@ class PcbRoutingService:
             "semantic_stagnation_passes": request.semantic_stagnation_passes,
             "thread_count": request.thread_count,
             "existing_copper_policy": request.existing_copper_policy,
+            "maximum_autorouting_attempts": 3,
+            "requested_candidate_count": request.candidate_count,
+            "excluded_plane_net_count": len(request.excluded_plane_nets),
+            "fine_pitch_escape_stubs": request.allow_fine_pitch_escape_stubs,
+            "seed_segment_count": len(request.seed_segments),
+            "seed_via_count": len(request.seed_vias),
         }
         for attribute, name in (
             ("timeout_seconds", "wall_time_budget_seconds"),
@@ -928,6 +1125,16 @@ class PcbRoutingService:
             value = getattr(self.routing_backend, attribute, None)
             if isinstance(value, int | float) and not isinstance(value, bool):
                 configuration[name] = value
+        if strategy is not None:
+            configuration["attempt_configuration"] = strategy
+            configuration["freerouting_user_strategy"] = (
+                "prioritized" if strategy == "prioritized_single_thread" else strategy
+            )
+            configuration["effective_thread_count"] = (
+                1
+                if strategy == "prioritized_single_thread"
+                else request.thread_count or max(1, (os.cpu_count() or 2) - 1)
+            )
         return configuration
 
     def propose(self, session_id: str, request: RoutingRequest) -> RoutingPlan:
@@ -973,7 +1180,16 @@ class PcbRoutingService:
         explicit_roles.update(
             {net: role for net, role in request.net_roles.items() if net in target_nets}
         )
-        request = request.model_copy(update={"nets": target_nets, "net_roles": explicit_roles})
+        excluded_plane_nets = request.excluded_plane_nets
+        if not excluded_plane_nets:
+            excluded_plane_nets = self.adapter.zone_net_names(pcb)
+        request = request.model_copy(
+            update={
+                "nets": target_nets,
+                "net_roles": explicit_roles,
+                "excluded_plane_nets": excluded_plane_nets,
+            }
+        )
         board_analysis = self.adapter.analyze_routing(pcb, session_id)
         parsed = self.adapter.parse(pcb, session_id)
         bounds = parsed.summary.board_bounds
@@ -1033,7 +1249,7 @@ class PcbRoutingService:
                 final_drc_warning_count=self._drc_warning_count(baseline_drc),
             )
         )
-        strategies = ("prioritized", "sequential")[: request.candidate_count]
+        strategies = FreeRoutingAdapter.strategies(request)
         evaluated: list[
             tuple[
                 tuple[int, int, int, int, float, int],
@@ -1044,22 +1260,48 @@ class PcbRoutingService:
         ] = []
         diagnostic_candidates: list[RoutingCandidateEvaluation] = []
         failures: list[str] = []
-        seen_fingerprints: dict[str, str] = {}
+        seen_fingerprints: dict[str, RoutingStrategy] = {}
+        seed_only_candidate = False
         proposal_root = self.data_dir / "routing-proposals"
         proposal_root.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="freerouting-", dir=proposal_root) as directory:
             root = Path(directory)
-            router_input = self._stage_router_input(pcb, root / "input", target_nets)
+            router_input = self._stage_router_input(
+                pcb,
+                root / "input",
+                target_nets,
+                add_escape_stubs=request.allow_fine_pitch_escape_stubs,
+                default_width_mm=request.default_track_width_mm,
+                default_clearance_mm=request.default_clearance_mm,
+                via_diameter_mm=request.via_diameter_mm,
+                via_drill_mm=request.via_drill_mm,
+                seed_segments=request.seed_segments,
+                seed_vias=request.seed_vias,
+            )
+            seeded_candidate: RoutedBoardCandidate | None = None
+            if request.allow_fine_pitch_escape_stubs or request.seed_segments or request.seed_vias:
+                seeded_analysis = self.adapter.analyze_routing(
+                    router_input, session_id, target_nets
+                )
+                if seeded_analysis.complete:
+                    self.routing_backend.refill_zones(router_input)
+                    seeded_candidate = RoutedBoardCandidate(
+                        strategy="prioritized",
+                        pcb=router_input,
+                        elapsed_seconds=0,
+                    )
+                    strategies = ("prioritized",)
+                    seed_only_candidate = True
             for strategy_index, strategy in enumerate(strategies):
                 candidate_started_at = utc_now()
                 candidate_started = time.monotonic()
                 candidate = None
                 try:
-                    candidate = self.routing_backend.route(
+                    candidate = seeded_candidate or self.routing_backend.route(
                         router_input,
                         root / strategy,
                         request,
-                        strategy,  # type: ignore[arg-type]
+                        strategy,
                     )
                     segments, vias = self._routing_delta(pcb, candidate.pcb, target_nets)
                     if not request.allow_vias and vias:
@@ -1096,7 +1338,7 @@ class PcbRoutingService:
                     duplicate_of = seen_fingerprints.get(fingerprint)
                     seen_fingerprints.setdefault(fingerprint, strategy)
                     evaluation = RoutingCandidateEvaluation(
-                        strategy=strategy,  # type: ignore[arg-type]
+                        strategy=strategy,
                         complete=routed_analysis.complete,
                         unrouted_connection_count=routed_analysis.unrouted_connection_count,
                         drc_available=candidate_drc.available and candidate_drc.error is None,
@@ -1105,7 +1347,7 @@ class PcbRoutingService:
                         via_count=len(vias),
                         track_length_mm=track_length,
                         fingerprint=fingerprint,
-                        duplicate_of=duplicate_of,  # type: ignore[arg-type]
+                        duplicate_of=duplicate_of,
                         backend_elapsed_seconds=candidate.elapsed_seconds,
                         freerouting_pass_metrics=candidate.pass_metrics,
                         freerouting_normalization_count=candidate.normalization_count,
@@ -1165,8 +1407,8 @@ class PcbRoutingService:
                             placement_density_percent=placement_density,
                             backend=status.name,
                             backend_version=status.version,
-                            strategy=strategy,  # type: ignore[arg-type]
-                            effective_configuration=self._routing_configuration(request),
+                            strategy=strategy,
+                            effective_configuration=self._routing_configuration(request, strategy),
                             requested_net_count=len(target_nets),
                             requested_net_role_counts=requested_net_role_counts,
                             baseline_routed_net_count=analysis.routed_net_count,
@@ -1248,8 +1490,8 @@ class PcbRoutingService:
                             placement_density_percent=placement_density,
                             backend=status.name,
                             backend_version=status.version,
-                            strategy=strategy,  # type: ignore[arg-type]
-                            effective_configuration=self._routing_configuration(request),
+                            strategy=strategy,
+                            effective_configuration=self._routing_configuration(request, strategy),
                             requested_net_count=len(target_nets),
                             requested_net_role_counts=requested_net_role_counts,
                             baseline_routed_net_count=analysis.routed_net_count,
@@ -1286,7 +1528,7 @@ class PcbRoutingService:
                     )
                     diagnostic_candidates.append(
                         RoutingCandidateEvaluation(
-                            strategy=strategy,  # type: ignore[arg-type]
+                            strategy=strategy,
                             complete=False,
                             unrouted_connection_count=analysis.unrouted_connection_count,
                             drc_available=False,
@@ -1347,9 +1589,17 @@ class PcbRoutingService:
             placement_rework_recommended=bool(routing_hotspots),
             recommended_max_passes=recommended_max_passes,
             evidence=(
-                "Copper geometry was generated by a local FreeRouting process through "
-                "KiCad's official Specctra DSN/SES bridge",
+                (
+                    "Copper geometry was completed by explicitly supplied typed seeds and/or "
+                    "enabled geometry-derived fine-pitch escapes before a router process "
+                    "was needed"
+                    if seed_only_candidate
+                    else "Copper geometry was generated by a local FreeRouting process through "
+                    "KiCad's official Specctra DSN/SES bridge"
+                ),
                 f"Evaluated {len(evaluations)} deterministic candidate configuration(s)",
+                "Autorouting stopped after the configured candidates, with a hard maximum of "
+                "three attempts",
                 f"Observed {len(seen_fingerprints)} unique copper candidate(s)",
                 f"Selected {selected.strategy}: {selected.segment_count} segments, "
                 f"{selected.via_count} vias, {selected.track_length_mm:g} mm routed length",
@@ -1358,6 +1608,8 @@ class PcbRoutingService:
                 "FreeRouting consumes the netclasses and board rules serialized by KiCad",
                 "The selected candidate is still subject to the authoritative prepared-workspace "
                 "connectivity and comparative KiCad DRC gates",
+                "Only the selected candidate is applied to the prepared PCB; final acceptance "
+                "and engineering completion remain with the user",
                 "Routing does not certify SI, PI, EMC, thermal, or impedance behavior",
             ),
         )

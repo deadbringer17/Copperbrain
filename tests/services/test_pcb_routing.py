@@ -301,15 +301,48 @@ def test_duplicate_candidates_are_reported(tmp_path: Path, monkeypatch: pytest.M
     assert plan.candidate_evaluations[0].fingerprint == plan.candidate_evaluations[1].fingerprint
 
 
-def test_routing_proposal_emits_reusable_connectivity_metrics(
+def test_autorouting_is_hard_limited_to_three_ranked_attempts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, session = setup(tmp_path, monkeypatch)
+
+    plan = service.propose(session, RoutingRequest(candidate_count=3))
+
+    assert [item.strategy for item in plan.candidate_evaluations] == [
+        "prioritized",
+        "sequential",
+        "prioritized_single_thread",
+    ]
+    assert sum(item.selected for item in plan.candidate_evaluations) == 1
+    assert any("hard maximum of three attempts" in item for item in plan.evidence)
+    with pytest.raises(ValueError, match="less than or equal to 3"):
+        RoutingRequest(candidate_count=4)
+
+
+def test_default_routing_proposal_runs_a_single_candidate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service, _, session = setup(tmp_path, monkeypatch)
 
     plan = service.propose(session, RoutingRequest())
 
+    assert [item.strategy for item in plan.candidate_evaluations] == ["prioritized"]
+
+
+def test_routing_proposal_emits_reusable_connectivity_metrics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, session = setup(tmp_path, monkeypatch)
+
+    plan = service.propose(session, RoutingRequest(candidate_count=3))
+
     records = sorted((tmp_path / "data" / "metrics" / "connectivity").rglob("*.json"))
-    assert [path.name for path in records] == ["baseline.json", "candidate-prioritized.json"]
+    assert [path.name for path in records] == [
+        "baseline.json",
+        "candidate-prioritized.json",
+        "candidate-prioritized_single_thread.json",
+        "candidate-sequential.json",
+    ]
     payloads = [json.loads(path.read_text(encoding="utf-8")) for path in records]
     assert {payload["phase"] for payload in payloads} == {"baseline", "candidate"}
     assert all(payload["schema_version"] == 4 for payload in payloads)
@@ -328,10 +361,10 @@ def test_routing_proposal_emits_reusable_connectivity_metrics(
     assert plan.metrics_run_id == payloads[0]["run_id"] == payloads[1]["run_id"]
 
     summary = service.metrics_for_run(plan.metrics_run_id)
-    assert summary.record_count == 2
+    assert summary.record_count == 4
     assert summary.best_strategy == "prioritized"
     assert summary.best_open_connection_delta == 1
-    assert summary.comparable_candidate_count == 1
+    assert summary.comparable_candidate_count == 3
     assert summary.failed_candidate_count == 0
     assert summary.recommended_max_passes == 2
     assert summary.same_baseline_batches[0].run_id == plan.metrics_run_id
@@ -437,7 +470,7 @@ def test_failed_candidate_flushes_structured_metrics_before_error(
     service.routing_backend = FailingRoutingBackend()
 
     with pytest.raises(CopperbrainError, match="no usable routing candidate") as caught:
-        service.propose(session, RoutingRequest())
+        service.propose(session, RoutingRequest(candidate_count=3))
 
     diagnostics = caught.value.error.details["partial_candidate_diagnostics"]
     assert diagnostics[0]["diagnostic_only"] is True
@@ -453,7 +486,7 @@ def test_failed_candidate_flushes_structured_metrics_before_error(
     assert payload["freerouting_pass_metrics"][0]["board_incomplete_count"] == 1
     assert payload["freerouting_normalization_count"] == 2
     summary = service.metrics_for_run(candidate.parent.name)
-    assert summary.failed_candidate_count == 1
+    assert summary.failed_candidate_count == 3
     assert summary.best_observed_pass_number == 1
     assert summary.watchdog_reasons == ("stalled",)
 
@@ -589,3 +622,61 @@ def test_incremental_routing_requires_explicit_preserve_policy(
         service.propose(session, RoutingRequest())
     assert caught.value.error.actionable_hint is not None
     assert "existing_copper_policy='preserve'" in caught.value.error.actionable_hint
+
+
+class _CapturingRoutingBackend(FakeRoutingBackend):
+    def __init__(self) -> None:
+        self.requests: list[RoutingRequest] = []
+
+    def route(
+        self, pcb: Path, workspace: Path, request: RoutingRequest, strategy: str
+    ) -> RoutedBoardCandidate:
+        self.requests.append(request)
+        return super().route(pcb, workspace, request, strategy)
+
+
+def _add_ground_zone(pcb: Path) -> None:
+    text = pcb.read_text(encoding="utf-8")
+    text = text.replace('  (net 1 "GND")', '  (net 1 "GND")\n  (net 2 "PWR")')
+    zone = (
+        '  (zone (net 2) (net_name "PWR") (layer "F.Cu") (hatch edge 0.5)'
+        " (connect_pads (clearance 0.2))"
+        " (polygon (pts (xy 0 0) (xy 40 0) (xy 40 20) (xy 0 20))))\n"
+    )
+    index = text.rstrip().rfind(")")
+    pcb.write_text(text[:index] + zone + text[index:], encoding="utf-8")
+
+
+def test_global_batch_defaults_excluded_plane_nets_to_zone_nets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, pcb, session = setup(tmp_path, monkeypatch)
+    _add_ground_zone(pcb)
+    backend = _CapturingRoutingBackend()
+    service.routing_backend = backend
+
+    plan = service.propose(session, RoutingRequest())
+
+    assert plan.request.excluded_plane_nets == ("PWR",)
+    assert backend.requests[0].excluded_plane_nets == ("PWR",)
+
+
+def test_explicit_excluded_plane_nets_override_the_zone_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, pcb, session = setup(tmp_path, monkeypatch)
+    _add_ground_zone(pcb)
+
+    plan = service.propose(session, RoutingRequest(excluded_plane_nets=("OTHER_NET",)))
+
+    assert plan.request.excluded_plane_nets == ("OTHER_NET",)
+
+
+def test_board_without_zones_keeps_excluded_plane_nets_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _, session = setup(tmp_path, monkeypatch)
+
+    plan = service.propose(session, RoutingRequest())
+
+    assert plan.request.excluded_plane_nets == ()

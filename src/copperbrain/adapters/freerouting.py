@@ -29,7 +29,12 @@ from copperbrain.models import (
 
 _MAX_ROUTER_OUTPUT_BYTES = 100_000_000
 _MINIMUM_JAVA_MAJOR = 25
-_STRATEGIES = ("prioritized", "sequential")
+RoutingStrategy = Literal["prioritized", "sequential", "prioritized_single_thread"]
+_STRATEGIES: tuple[RoutingStrategy, ...] = (
+    "prioritized",
+    "sequential",
+    "prioritized_single_thread",
+)
 _NORMALIZATION_LOOP = "PolylineTrace.normalize: max normalization depth"
 _PASS_START = re.compile(
     r"Pass #(?P<pass>\d+): (?P<incomplete>\d+) incompletes across "
@@ -258,11 +263,28 @@ def _split_wiring_polylines(content: str) -> str:
     return content
 
 
+def _exclude_plane_nets(content: str, net_names: tuple[str, ...]) -> str:
+    """Remove only reviewed plane expressions from the private Specctra input."""
+    if not net_names:
+        return content
+    excluded = set(net_names)
+    replacements: list[tuple[int, int, str]] = []
+    for match in re.finditer(r"(?m)^[ \t]*\(plane(?=\s|\()", content):
+        expression_start = content.find("(", match.start())
+        expression_end = _sexpr_end(content, expression_start)
+        tag, name = _expression_head(content, expression_start)
+        if tag == "plane" and name in excluded:
+            replacements.append((match.start(), expression_end, ""))
+    for start, end, replacement in reversed(replacements):
+        content = content[:start] + replacement + content[end:]
+    return content
+
+
 @dataclass(frozen=True)
 class RoutedBoardCandidate:
     """One isolated board returned by an external routing backend."""
 
-    strategy: Literal["prioritized", "sequential"]
+    strategy: RoutingStrategy
     pcb: Path
     elapsed_seconds: float
     stdout_tail: str = ""
@@ -367,16 +389,28 @@ class _FreeRoutingProgress:
         return tuple(metrics)
 
     def semantic_stagnation_streak(self) -> int:
-        """Count completed consecutive passes without fewer board-wide opens."""
+        """Count completed consecutive passes without fewer opens or a better score."""
         streak = 0
-        previous: int | None = None
+        previous: FreeRoutingPassMetric | None = None
         for metric in self.metrics():
             current = metric.board_unrouted_count
             if current is None:
                 continue
             if previous is not None:
-                streak = streak + 1 if current >= previous else 0
-            previous = current
+                opens_decreased = (
+                    previous.board_unrouted_count is not None
+                    and current < previous.board_unrouted_count
+                )
+                score_improved = (
+                    metric.score is not None
+                    and previous.score is not None
+                    and metric.score < previous.score
+                )
+                if current > 0 and not opens_decreased and not score_improved:
+                    streak += 1
+                else:
+                    streak = 0
+            previous = metric
         return streak
 
     def error_details(self) -> dict[str, object]:
@@ -398,7 +432,7 @@ class RoutingBackend(Protocol):
         pcb: Path,
         workspace: Path,
         request: RoutingRequest,
-        strategy: Literal["prioritized", "sequential"],
+        strategy: RoutingStrategy,
     ) -> RoutedBoardCandidate: ...
 
 
@@ -519,7 +553,7 @@ class FreeRoutingAdapter:
         timeout_seconds: float = 900,
         stall_seconds: float = 180,
         normalization_limit: int = 100,
-        semantic_stagnation_passes: int = 3,
+        semantic_stagnation_passes: int = 8,
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         process_factory: Callable[..., subprocess.Popen[str]] | None = None,
         poll_interval_seconds: float = 0.25,
@@ -550,7 +584,7 @@ class FreeRoutingAdapter:
         timeout_seconds: float = 900,
         stall_seconds: float = 180,
         normalization_limit: int = 100,
-        semantic_stagnation_passes: int = 3,
+        semantic_stagnation_passes: int = 8,
     ) -> FreeRoutingAdapter:
         jars = _candidate_jars(data_dir, explicit_jar)
         selected_java: tuple[Path | None, int | None]
@@ -615,8 +649,9 @@ class FreeRoutingAdapter:
         )
 
     @staticmethod
-    def strategies(request: RoutingRequest) -> tuple[Literal["prioritized", "sequential"], ...]:
-        return _STRATEGIES[: request.candidate_count]  # type: ignore[return-value]
+    def strategies(request: RoutingRequest) -> tuple[RoutingStrategy, ...]:
+        """Return the hard-bounded deterministic autorouting attempt configurations."""
+        return _STRATEGIES[: request.candidate_count]
 
     def _run(self, command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
         try:
@@ -785,10 +820,22 @@ class FreeRoutingAdapter:
         return value[-limit:]
 
     @staticmethod
-    def _sanitize_dsn(path: Path, target_nets: tuple[str, ...] = ()) -> tuple[str, ...]:
+    def _sanitize_dsn(
+        path: Path,
+        target_nets: tuple[str, ...] = (),
+        excluded_plane_nets: tuple[str, ...] = (),
+    ) -> tuple[str, ...]:
         content = path.read_text(encoding="utf-8", errors="strict")
         sanitized = re.sub("[ΩµΦ]", "", content)
         sanitized = re.sub(r"\A\(pcb\s+[^\r\n]+", f"(pcb {path.name}", sanitized, count=1)
+        try:
+            sanitized = _exclude_plane_nets(sanitized, excluded_plane_nets)
+        except ValueError as exc:
+            raise CopperbrainError(
+                ErrorCode.VALIDATION_FAILED,
+                "KiCad exported unsupported Specctra plane geometry",
+                details={"reason": str(exc)},
+            ) from exc
         ignored_classes: tuple[str, ...] = ()
         if target_nets:
             try:
@@ -876,7 +923,7 @@ class FreeRoutingAdapter:
         pcb: Path,
         workspace: Path,
         request: RoutingRequest,
-        strategy: Literal["prioritized", "sequential"],
+        strategy: RoutingStrategy,
     ) -> RoutedBoardCandidate:
         status = self.status()
         if not status.available:
@@ -913,7 +960,11 @@ class FreeRoutingAdapter:
                 "KiCad failed to export the PCB as Specctra DSN",
                 details={"reason": self._tail(exported.stderr or exported.stdout)},
             )
-        ignored_classes = self._sanitize_dsn(dsn, request.nets)
+        ignored_classes = self._sanitize_dsn(
+            dsn,
+            request.nets,
+            request.excluded_plane_nets,
+        )
         capabilities, capability_path, capability_reason = _verified_capabilities(self.jar_path)
         if ignored_classes and not (
             capabilities is not None and capabilities.scoped_net_classes_cli
@@ -935,7 +986,14 @@ class FreeRoutingAdapter:
                 },
             )
 
-        thread_count = request.thread_count or max(1, (os.cpu_count() or 2) - 1)
+        thread_count = (
+            1
+            if strategy == "prioritized_single_thread"
+            else request.thread_count or max(1, (os.cpu_count() or 2) - 1)
+        )
+        freerouting_strategy = (
+            "prioritized" if strategy == "prioritized_single_thread" else strategy
+        )
         started = time.monotonic()
         router_command = [
             str(self.java_path),
@@ -950,7 +1008,7 @@ class FreeRoutingAdapter:
             "-mt",
             str(thread_count),
             "-us",
-            strategy,
+            freerouting_strategy,
         ]
         if ignored_classes:
             router_command.extend(("-inc", ",".join(ignored_classes)))

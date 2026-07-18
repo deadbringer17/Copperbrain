@@ -933,10 +933,14 @@ class RoutingRequest(FrozenModel):
     allow_vias: bool = True
     require_complete: bool = True
     existing_copper_policy: Literal["reject", "preserve"] = "reject"
-    candidate_count: Annotated[int, Field(ge=1, le=2)] = 1
+    candidate_count: Annotated[int, Field(ge=1, le=3)] = 1
     max_passes: Annotated[int, Field(ge=1, le=200)] = 30
-    semantic_stagnation_passes: Annotated[int, Field(ge=1, le=50)] = 3
+    semantic_stagnation_passes: Annotated[int, Field(ge=1, le=50)] = 8
     thread_count: Annotated[int, Field(ge=0, le=64)] = 0
+    excluded_plane_nets: Annotated[tuple[str, ...], Field(max_length=32)] = ()
+    allow_fine_pitch_escape_stubs: bool = False
+    seed_segments: Annotated[tuple[RouteSegment, ...], Field(max_length=512)] = ()
+    seed_vias: Annotated[tuple[RouteVia, ...], Field(max_length=256)] = ()
     net_roles: dict[
         str,
         Literal[
@@ -961,6 +965,17 @@ class RoutingRequest(FrozenModel):
             raise ValueError("routing net names must not be empty")
         if any(not item.strip() for item in self.net_roles):
             raise ValueError("routing net role names must not be empty")
+        if len(self.excluded_plane_nets) != len(set(self.excluded_plane_nets)):
+            raise ValueError("excluded routing plane net names must be unique")
+        if any(not item.strip() for item in self.excluded_plane_nets):
+            raise ValueError("excluded routing plane net names must not be empty")
+        seed_nets = {item.net for item in self.seed_segments} | {
+            item.net for item in self.seed_vias
+        }
+        if self.nets and not seed_nets.issubset(self.nets):
+            raise ValueError("routing seeds must reference requested nets")
+        if self.seed_vias and not self.allow_vias:
+            raise ValueError("routing seed vias require allow_vias")
         if self.nets and not set(self.net_roles).issubset(self.nets):
             raise ValueError("explicit routing net roles must reference requested nets")
         return self
@@ -1004,7 +1019,7 @@ class ConnectivityMetricRecord(FrozenModel):
     placement_density_percent: Annotated[float, Field(ge=0, le=100)] | None = None
     backend: str
     backend_version: str | None = None
-    strategy: Literal["prioritized", "sequential"] | None = None
+    strategy: Literal["prioritized", "sequential", "prioritized_single_thread"] | None = None
     effective_configuration: dict[str, str | int | float | bool] = Field(default_factory=dict)
     requested_net_count: Annotated[int, Field(ge=0)] = 0
     requested_net_role_counts: dict[str, Annotated[int, Field(ge=0)]] = Field(default_factory=dict)
@@ -1061,7 +1076,7 @@ class ConnectivityMetricRunSummary(FrozenModel):
     run_id: str = Field(pattern=r"^[0-9a-f]{32}$")
     record_count: Annotated[int, Field(ge=1)]
     records: Annotated[tuple[ConnectivityMetricRecord, ...], Field(min_length=1)]
-    best_strategy: Literal["prioritized", "sequential"] | None = None
+    best_strategy: Literal["prioritized", "sequential", "prioritized_single_thread"] | None = None
     best_open_connection_delta: int | None = None
     comparable_candidate_count: Annotated[int, Field(ge=0)] = 0
     failed_candidate_count: Annotated[int, Field(ge=0)] = 0
@@ -1075,7 +1090,7 @@ class ConnectivityMetricRunSummary(FrozenModel):
 class RoutingCandidateEvaluation(FrozenModel):
     """Deterministic evidence used to rank one external autorouter result."""
 
-    strategy: Literal["prioritized", "sequential"]
+    strategy: Literal["prioritized", "sequential", "prioritized_single_thread"]
     selected: bool = False
     complete: bool
     unrouted_connection_count: Annotated[int, Field(ge=0)]
@@ -1085,7 +1100,7 @@ class RoutingCandidateEvaluation(FrozenModel):
     via_count: Annotated[int, Field(ge=0)]
     track_length_mm: Annotated[float, Field(ge=0)]
     fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
-    duplicate_of: Literal["prioritized", "sequential"] | None = None
+    duplicate_of: Literal["prioritized", "sequential", "prioritized_single_thread"] | None = None
     backend_elapsed_seconds: Annotated[float, Field(ge=0)] = 0
     freerouting_pass_metrics: tuple[FreeRoutingPassMetric, ...] = ()
     freerouting_normalization_count: Annotated[int, Field(ge=0)] = 0

@@ -93,8 +93,13 @@ def test_route_uses_only_fixed_argument_lists(tmp_path: Path) -> None:
     candidate = adapter.route(
         pcb,
         tmp_path / "candidate",
-        RoutingRequest(nets=("/KEEP",), max_passes=7, thread_count=2),
-        "prioritized",
+        RoutingRequest(
+            nets=("/KEEP",),
+            excluded_plane_nets=("/DROP",),
+            max_passes=7,
+            thread_count=2,
+        ),
+        "prioritized_single_thread",
     )
     adapter.refill_zones(pcb)
     assert candidate.pcb.is_file()
@@ -103,14 +108,15 @@ def test_route_uses_only_fixed_argument_lists(tmp_path: Path) -> None:
     router = commands[1]
     assert router[:3] == [str(java.resolve()), "-jar", str(jar.resolve())]
     assert router[router.index("-mp") + 1] == "7"
-    assert router[router.index("-mt") + 1] == "2"
+    assert router[router.index("-mt") + 1] == "1"
+    assert router[router.index("-us") + 1] == "prioritized"
     assert router[router.index("-inc") + 1] == "__copperbrain_preserve_1"
     assert "--gui.enabled=false" in router
     dsn = (tmp_path / "candidate" / "freerouting-input.dsn").read_text(encoding="utf-8")
     assert "Ω" not in dsn
     assert "(net /KEEP" in dsn
     assert "(net /DROP" in dsn
-    assert "(plane /DROP" in dsn
+    assert "(plane /DROP" not in dsn
     assert "(class default /KEEP" in dsn
     assert "(class __copperbrain_preserve_1 /DROP" in dsn
     assert "(path F.Cu 200 0 0 10 0 10 10)" not in dsn
@@ -120,6 +126,12 @@ def test_route_uses_only_fixed_argument_lists(tmp_path: Path) -> None:
     assert status.scoped_routing_supported
     assert status.capability_path == capability
     assert commands[-1][2:4] == ["refill", str(pcb)]
+    assert FreeRoutingAdapter.strategies(RoutingRequest()) == ("prioritized",)
+    assert FreeRoutingAdapter.strategies(RoutingRequest(candidate_count=3)) == (
+        "prioritized",
+        "sequential",
+        "prioritized_single_thread",
+    )
 
 
 def test_route_refuses_scoped_headless_freerouting(tmp_path: Path) -> None:
@@ -400,3 +412,64 @@ def test_semantic_watchdog_counts_completed_passes_without_improvement() -> None
 
     assert progress.semantic_stagnation_streak() == 3
     assert [item.connections_resolved for item in progress.metrics()] == [2, 0, 0, 0]
+
+
+def _progress_for_passes(passes: list[tuple[int, float | None]]) -> _FreeRoutingProgress:
+    lines: list[str] = []
+    for number, (unrouted, score) in enumerate(passes, start=1):
+        lines.append(f"Pass #{number}: {unrouted} incompletes across 10 items to route\n")
+        score_text = "-1" if score is None else str(score)
+        lines.append(
+            f"Auto-router pass #{number} on board 'x' was completed in 1 seconds with "
+            f"the score of {score_text} ({unrouted} unrouted), using 1 CPU seconds and "
+            "the job allocated 1 GB\n"
+        )
+    progress = _FreeRoutingProgress()
+    progress.feed("".join(lines), final=True)
+    return progress
+
+
+def test_semantic_watchdog_ignores_flat_opens_with_improving_score() -> None:
+    progress = _progress_for_passes([(8, 10.0), (8, 9.0), (8, 8.5), (8, 8.0)])
+
+    assert progress.semantic_stagnation_streak() == 0
+
+
+def test_semantic_watchdog_counts_flat_opens_with_flat_score() -> None:
+    progress = _progress_for_passes([(8, 10.0), (8, 10.0), (8, 10.0)])
+
+    assert progress.semantic_stagnation_streak() == 2
+
+
+def test_semantic_watchdog_never_counts_completed_board_passes() -> None:
+    progress = _progress_for_passes([(8, 10.0), (0, 4.0), (0, 5.0), (0, 5.0)])
+
+    assert progress.semantic_stagnation_streak() == 0
+
+
+def test_semantic_watchdog_counts_flat_opens_when_score_stays_flat() -> None:
+    progress = _FreeRoutingProgress()
+    progress.feed(
+        "Pass #1: 10 incompletes across 10 items to route\n"
+        "Pass #2: 8 incompletes across 8 items to route\n"
+        "Pass #3: 8 incompletes across 8 items to route\n",
+        final=True,
+    )
+
+    # No completed-pass lines: board_unrouted_count is unknown, so nothing counts.
+    assert progress.semantic_stagnation_streak() == 0
+
+
+def test_routing_request_defaults_allow_longer_autorouter_progress() -> None:
+    request = RoutingRequest()
+
+    assert request.semantic_stagnation_passes == 8
+    assert request.candidate_count == 1
+    assert (
+        FreeRoutingAdapter(
+            jar_path=None,
+            java_path=None,
+            kicad_python_path=None,
+        ).semantic_stagnation_passes
+        == 8
+    )
