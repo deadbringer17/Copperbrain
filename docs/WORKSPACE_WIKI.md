@@ -11,6 +11,7 @@ For product scope and public contracts, read [`README.md`](../README.md). For ag
 | `AGENTS.md` | Real-project workflow, architecture, safety, mandatory connectivity/routing metrics, testing, Git, and documentation rules | The operational workflow or agent guardrails change |
 | `docs/WORKSPACE_WIKI.md` | Fast path-oriented map of the workspace | Any relevant file, responsibility, entry point, relationship, or test location changes |
 | `pyproject.toml` | Package metadata, runtime/dev dependencies, and validation tool configuration | Dependencies, entry points, or validation policy changes |
+| `src/copperbrain/cli.py` | Default MCP-server launch plus explicit maintenance commands such as the guarded source updater | CLI dispatch or maintenance command behavior changes |
 | `README.md` | Installation, server launch, and user-facing workflow | Setup or public usage changes |
 | `assets/copperbrain-mcp-icon*.png` | Square Copperbrain MCP icons combining a protected shield, brain, and PCB traces; the `kicad-style` variant adds blue EDA styling | MCP branding or icon artwork changes |
 | `.gitignore` | Excludes virtual environments, caches, runtime databases, locks, and generated fabrication outputs | Generated/local artifact policy changes |
@@ -18,6 +19,7 @@ For product scope and public contracts, read [`README.md`](../README.md). For ag
 | `src/copperbrain/errors.py` | Stable actionable application errors | Error taxonomy or mapping changes |
 | `src/copperbrain/config.py` | Explicit environment-backed runtime settings | Cache, data, download, or timeout configuration changes |
 | `src/copperbrain/adapters/kicad_detection.py` | Dynamic PATH/environment/Windows-registry KiCad CLI discovery, numeric newest-version selection, user-data, and optional JLC plugin discovery | Installation/plugin discovery changes |
+| `src/copperbrain/adapters/repository_updates.py` | Fixed-command Git boundary for official-origin fetch, revision checks, and fast-forward-only source updates | Source-update Git operations, timeouts, or command policy changes |
 | `src/copperbrain/adapters/kicad_cli.py` | Fixed-command KiCad netlist/ERC/DRC/PDF operations with byte-exact restoration of incidental `.kicad_prl` and `.kicad_pro` writes, plus footprint parsing validation | CLI invocation, side-effect containment, or KiCad output formats change |
 | `src/copperbrain/adapters/kicad_specctra_worker.py` | Fixed-action worker executed by KiCad's bundled Python for headless DSN export, SES import, and post-route zone refill | KiCad Specctra bridge or routed-zone behavior changes |
 | `src/copperbrain/adapters/kicad_project_worker.py` | Fixed-action worker using KiCad's bundled Python to create/relayer boards, apply validated footprint transforms, and fill typed clipped ground regions/fanouts/vias | Empty-board API creation, layer policy, placement transforms, or grounding execution changes |
@@ -35,6 +37,7 @@ For product scope and public contracts, read [`README.md`](../README.md). For ag
 | `src/copperbrain/adapters/schematic_api.py` | Allowlisted semantic operations through pinned `kicad-sch-api`, including geometry-derived outward label stubs, controlled project-library registration, KiCad-private-property compatibility, standard-field-aware properties, and allowlisted paper sizes | Add/replace/property/wire/label/no-connect/paper mutation or local-library resolution changes |
 | `src/copperbrain/adapters/schematic_readability.py` | Read-only label-to-wire endpoint attachment, pin attachment, overlap, duplicate-position, component-spacing, occupied-area, and readability scoring for parsed schematics | Schematic presentation metrics or readability gates change |
 | `src/copperbrain/services/projects.py` | Read-only project sessions, generated-output source refusal, history/backup-excluding discovery and hashes, summary, trace, analysis, and ERC orchestration | Project analysis or discovery behavior changes |
+| `src/copperbrain/services/updates.py` | Deterministic clean-main, official-origin, fast-forward-only source-update policy and actionable refusals | Update safety gates or outcomes change |
 | `src/copperbrain/services/project_creation.py` | Preview-first, restart-safe empty-project creation with private manifests, validation, confirmation, atomic apply, hash-guarded rollback, and nonempty-target refusal | New-project lifecycle changes |
 | `src/copperbrain/services/sourcing.py` | SQLite evidence cache, hard filters, deterministic scoring, ranking, and comparison | Sourcing rules or pricing selection changes |
 | `src/copperbrain/services/assets.py` | Extension/root/pin-pad validated, atomic, idempotent local asset installation | Asset layout or import validation changes |
@@ -55,6 +58,7 @@ For product scope and public contracts, read [`README.md`](../README.md). For ag
 | `benchmark_bldc_drv8311/` | Generated 85×50 mm DRV8311S BLDC KiCad benchmark; user artifacts remain under its ignored `copperbrain-output/` tree | Compact BLDC fixture topology, placement, rules, or reproducible benchmark evidence changes |
 | `benchmark-test3/` | Gated 9–15 V to 48 V / 0.5 A LT3757A boost-converter benchmark and its ignored preview artifacts | Boost benchmark schematic, PCB, or reproducible connectivity metrics change |
 | `tests/` | Offline unit and adapter tests mirroring package responsibilities | Any tested behavior changes |
+| `tests/services/test_updates.py` and `tests/adapters/test_repository_updates.py` | Source-update policy refusals, outcomes, and fixed Git command coverage | Updater behavior or Git adapter operations change |
 | `tests/fixtures/kicad10_minimal/` | Small unmodified KiCad 10 demo project copied from the KiCad distribution | Parser/mutation compatibility fixtures change |
 | `tests/fixtures/kicad10_placement/` | Minimal KiCad PCB with outline, footprints, pads, track, and via for deterministic placement tests | PCB placement fixture coverage changes |
 | `tests/fixtures/jlc_catalog.json` | Timestamped recorded component evidence for deterministic offline tests | Catalog normalization examples change |

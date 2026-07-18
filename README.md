@@ -25,6 +25,17 @@ Start the server with `uv run copperbrain`. Configure an MCP client to execute `
 only and never starts a public network listener. See `docs/INSTALLATION.md` for the full
 environment-variable reference and mutation-safety details.
 
+To update a source checkout explicitly from the official `origin/main`, run:
+
+```powershell
+uv run copperbrain update
+```
+
+The updater accepts only a clean `main` worktree with the official Copperbrain GitHub origin and
+applies a Git fast-forward only. It refuses dirty worktrees, detached or different branches,
+unexpected remotes, and divergent history; it never stashes, resets, rebases, or discards local
+work. Restart Codex or open a new task after a successful update.
+
 To fetch the optional runtime integrations (Java, FreeRouting, JLCImport, JLCPCB Tools)
 automatically instead of installing them by hand, run:
 

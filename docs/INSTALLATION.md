@@ -22,6 +22,22 @@ Start the server with `uv run copperbrain`. Configure an MCP client to execute `
 arguments `run copperbrain` and this repository as its working directory. Copperbrain exposes
 local stdio only and never starts a public network listener.
 
+## Updating a source checkout
+
+Run the explicit maintenance command from any directory while using the source checkout's
+environment:
+
+```powershell
+uv run --directory C:\path\to\Copperbrain copperbrain update
+```
+
+The command verifies that the package is running from a Git source checkout, the current branch is
+`main`, the worktree is clean, and `origin` is the official Copperbrain GitHub repository. It then
+fetches only `origin/main` and applies `git merge --ff-only origin/main` when the remote is ahead.
+It reports an already-current or locally-ahead checkout without mutation and refuses unexpected
+remotes, local changes, other branches, detached HEAD, and divergent history. It does not stash,
+reset, rebase, delete, or resolve conflicts. Restart the MCP client after a successful update.
+
 ## Automated dependency setup (optional)
 
 `scripts/setup_dependencies.py` fetches the optional runtime integrations instead of installing

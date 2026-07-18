@@ -21,7 +21,7 @@ dev = [
 ]
 
 [project.scripts]
-copperbrain = "copperbrain.server:main"
+copperbrain = "copperbrain.cli:main"
 
 [build-system]
 requires = ["hatchling"]
