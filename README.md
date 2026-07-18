@@ -7,6 +7,24 @@ component-only BOM estimates.
 See this README for scope and public contracts, `docs/INSTALLATION.md` for setup, and
 `docs/DEMO.md` for the reproducible reference flow.
 
+## Installation
+
+Requires Windows, Python 3.11 or newer, `uv`, and KiCad 10.x (`kicad-cli.exe` is discovered
+dynamically). Java 25+ and a local FreeRouting JAR are required only for controlled PCB routing;
+JLCImport and JLCPCB Tools are optional and enable local component sourcing.
+
+```powershell
+git clone https://github.com/deadbringer17/Copperbrain.git
+cd Copperbrain
+uv sync --all-extras
+uv run pytest
+```
+
+Start the server with `uv run copperbrain`. Configure an MCP client to execute `uv` with arguments
+`run copperbrain` and this repository as its working directory. Copperbrain exposes local stdio
+only and never starts a public network listener. See `docs/INSTALLATION.md` for the full
+environment-variable reference and mutation-safety details.
+
 ## Development
 
 ```powershell
@@ -44,6 +62,37 @@ For an opened KiCad project, Copperbrain writes every deliverable artifact below
 `<project>/copperbrain-output/`: at most the stable `schematic`, `design-rules`, and `pcb` previews
 under `previews/`, plus BOM exports under `bom/`. Private mutation workspaces, caches, and rollback
 snapshots are not placed in the project.
+
+## Project analysis via MCP
+
+Call `detect_kicad` to confirm KiCad, CLI, and JLC plugin availability, then `open_project` to
+open a project read-only and hash its sources. `get_project_summary` returns sheets, components,
+electrical nets, and power symbols; `analyze_schematic` returns deterministic, evidence-backed
+observations; `trace_net` returns every pin KiCad assigns to one exact net name. `run_erc` and
+`run_drc` run KiCad's checks and normalize violations without touching project files.
+
+## Schematic changes via MCP
+
+`prepare_schematic_change` stages allowlisted operations in a private workspace and returns a
+semantic diff, risks, and a project-local PDF preview; `validate_change` revalidates it in place.
+Applying requires the first acceptance gate, `accept_schematic`, with `confirmed=true` and
+`editor_closed=true`.
+
+## Component sourcing via MCP
+
+`search_components` ranks JLCPCB/LCSC candidates against typed requirements using the installed
+JLCPCB Tools catalog or a recorded `COPPERBRAIN_JLC_CATALOG`. `get_component_details` returns
+normalized catalog details for one exact LCSC part; `compare_components` and `find_alternatives`
+rank supplied or discovered candidates against the same requirements. `estimate_component_cost`
+estimates component-only cost at one requested quantity. `import_component_assets` installs the
+resolved symbol/footprint/3D/datasheet assets locally from allowlisted HTTPS sources.
+
+## BOM via MCP
+
+`generate_bom` groups and enriches the schematic BOM and writes JSON/CSV/Markdown under
+`copperbrain-output/bom/`. `estimate_bom_cost` totals component-only cost at requested board
+quantities; `suggest_bom_substitutions` proposes requirement-motivated alternatives for BOM lines.
+All cost figures explicitly exclude PCB, assembly, stencil, shipping, taxes, and duties.
 
 ## PCB design rules via MCP
 
@@ -154,6 +203,12 @@ router does not redundantly route pads already joined by an applied plane. Check
 official Specctra DSN and returns one or two isolated candidates. Copperbrain ranks them by
 completion, new DRC errors, open connections, vias, and routed length. Only the selected
 candidate's copper delta becomes typed segments and vias; there is no internal routing fallback.
+Reviewed grounding domains are omitted only from FreeRouting's private DSN input so plane copper
+does not obstruct signal search. Their exact netlist remains present, and the selected typed copper
+is applied to the already-grounded private board, followed by KiCad zone refill and comparative DRC.
+Fine-pitch escape stubs are opt-in per routing batch. When enabled, Copperbrain derives short typed
+segments from pad and courtyard geometry, includes them in the private router input, and subjects
+the resulting complete copper delta to the same scope, preservation, connectivity, and DRC gates.
 When `nets` is empty, Copperbrain materializes the exact currently-unrouted net set before DSN
 export. FreeRouting retains non-target net and plane geometry but moves those nets into generated
 preserve classes during scope validation. The upstream FreeRouting 2.2.4 CLI parses `-inc` but does

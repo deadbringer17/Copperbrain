@@ -6,7 +6,7 @@ KiCad 10, JLCImport, and JLCPCB Tools are all detected and exercised.
 
 | Criterion | Evidence |
 |---|---|
-| Local MCP client can discover the server | `tests/test_server.py` verifies all 63 core and approved-extension FastMCP tools; `copperbrain` starts stdio only |
+| Local MCP client can discover the server | `tests/test_server.py` verifies all 40 core and approved-extension FastMCP tools; `copperbrain` starts stdio only |
 | KiCad 10.x and both JLC plugins are detected | `tests/adapters/test_kicad_detection.py`; real detection reports KiCad 10, JLCImport, and JLCPCB Tools |
 | Existing project analyzed read-only | `tests/integration/test_kicad_workflow.py` exports a real KiCad 10 netlist without touching the source |
 | History and backup copies excluded | `tests/services/test_projects.py` proves `.history`, `*-backups`, and generated output schematics are never selected as sources |
