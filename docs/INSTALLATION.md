@@ -22,6 +22,41 @@ Start the server with `uv run copperbrain`. Configure an MCP client to execute `
 arguments `run copperbrain` and this repository as its working directory. Copperbrain exposes
 local stdio only and never starts a public network listener.
 
+## Automated dependency setup (optional)
+
+`scripts/setup_dependencies.py` fetches the optional runtime integrations instead of installing
+them by hand. It is never run automatically or through MCP; you invoke it explicitly:
+
+```powershell
+uv run python scripts/setup_dependencies.py
+```
+
+It downloads, over HTTPS from official sources only, verifying a published checksum whenever the
+source provides one:
+
+- a Java runtime (Eclipse Temurin JDK, via the Adoptium API) into
+  `<COPPERBRAIN_DATA_DIR>/integrations/java/`;
+- the latest official FreeRouting release JAR (via the GitHub Releases API) into
+  `<COPPERBRAIN_DATA_DIR>/integrations/freerouting/`;
+- the JLCImport and JLCPCB Tools KiCad plugins (via KiCad's own official PCM repository metadata
+  at `kicad.github.io`) into the detected KiCad user `3rdparty/plugins` directory.
+
+The JLC plugin step is the only one that writes outside this repository: it installs into the
+local KiCad installation's plugin directory, the same location KiCad's own Plugin and Content
+Manager would use. The script prints exactly what it is about to do and asks for confirmation
+first, unless `--yes` is passed; `--skip-java`, `--skip-freerouting`, `--skip-jlc-plugins`, and
+`--data-dir`/`--kicad-plugin-dir` narrow or redirect it.
+
+It always writes a `scoped_net_classes_cli=false` capability record for the FreeRouting JAR it
+downloads. The stock upstream release does not have independently verified headless `-inc`
+net-class exclusion, so scoped (net-class-limited) routing stays refused as described under
+"Configuration" below; the script cannot and does not claim otherwise on your behalf. Full-board
+routing works with the downloaded JAR as-is.
+
+If KiCad's official addon repository changes shape or has no JLC listing at the time you run it,
+the script reports the failure per-component and continues with the rest; install JLCImport or
+JLCPCB Tools manually through KiCad's Plugin and Content Manager in that case.
+
 ## Configuration
 
 | Environment variable | Purpose |

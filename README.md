@@ -25,6 +25,19 @@ Start the server with `uv run copperbrain`. Configure an MCP client to execute `
 only and never starts a public network listener. See `docs/INSTALLATION.md` for the full
 environment-variable reference and mutation-safety details.
 
+To fetch the optional runtime integrations (Java, FreeRouting, JLCImport, JLCPCB Tools)
+automatically instead of installing them by hand, run:
+
+```powershell
+uv run python scripts/setup_dependencies.py
+```
+
+The script only ever contacts official sources over HTTPS (GitHub, Adoptium, `kicad.github.io`),
+verifies a checksum whenever the source publishes one, and asks for confirmation before writing
+anything — including the JLC plugins, which land in KiCad's own plugin directory, outside this
+repository. See "Automated dependency setup" in `docs/INSTALLATION.md` for exactly what it does
+and does not do.
+
 ## Development
 
 ```powershell

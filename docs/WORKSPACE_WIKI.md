@@ -64,6 +64,7 @@ For product scope and public contracts, read [`README.md`](../README.md). For ag
 | `tests/integration/test_project_scaffold_integration.py` | Real KiCad API creation of a parseable four-layer empty project | Project scaffold integration changes |
 | `tests/e2e/` | Reference flow from project analysis through sourcing, mutation, BOM, and rollback | Demo workflow changes |
 | `scripts/run_demo.py` | Non-destructive executable reference workflow using temporary copies | Demo sequence changes |
+| `scripts/setup_dependencies.py` | Explicit, checksum-verified, user-invoked downloader for optional Java/FreeRouting/JLC-plugin integrations from official sources only; never runs automatically or through MCP | Dependency sources, checksum policy, target directories, or CLI flags change |
 | `docs/INSTALLATION.md` | Windows/uv setup, MCP stdio configuration, environment, and mutation safety | Installation or configuration changes |
 | `docs/DEMO.md` | Offline and interactive demo procedure | Demo contract or expected output changes |
 | `docs/ACCEPTANCE.md` | Acceptance-criterion-to-test traceability and final validation gate | Acceptance criteria or evidence changes |
