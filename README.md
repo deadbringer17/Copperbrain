@@ -38,6 +38,27 @@ anything — including the JLC plugins, which land in KiCad's own plugin directo
 repository. See "Automated dependency setup" in `docs/INSTALLATION.md` for exactly what it does
 and does not do.
 
+## Installing in Codex CLI
+
+Complete the installation above first. Codex (the `codex` CLI) reads MCP server definitions from
+its `config.toml` — `~/.codex/config.toml` on Linux/macOS, `%USERPROFILE%\.codex\config.toml` on
+Windows. Add a `[mcp_servers.copperbrain]` entry:
+
+```toml
+[mcp_servers.copperbrain]
+command = "uv"
+args = ["run", "--directory", "C:\\path\\to\\Copperbrain", "copperbrain"]
+enabled = true
+```
+
+Codex launches `command` directly, without a shell and without setting a working directory of its
+own, so `uv run` needs `--directory <repo>` instead of relying on `cd`; use the absolute path to
+where you cloned this repository. To override an environment variable from
+`docs/INSTALLATION.md#configuration` for this server only, add it under
+`[mcp_servers.copperbrain.env]`, the same way other entries in `config.toml` do. Restart Codex (or
+start a new session) after editing the file. Copperbrain still exposes local stdio only; registering
+it this way adds no network exposure.
+
 ## Development
 
 ```powershell
