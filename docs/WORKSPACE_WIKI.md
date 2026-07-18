@@ -49,10 +49,10 @@ For product scope and architecture decisions, read [`DEVELOPMENT_PLAN.md`](../DE
 | `src/copperbrain/services/pcb_routing.py` | FreeRouting-only orchestration, rule-first net roles, local routing-hotspot detection, diagnostic-only partial candidates, safe scoped copper deltas, candidate/lifecycle metrics, compact review, preview, restart-safe apply/rollback, and snapshot recovery | PCB routing scope gates, role policy, hotspot/placement evidence, metrics, ranking, persistence, recovery, or workflow changes |
 | `src/copperbrain/services/pcb_finalization.py` | Compact routing-finalization orchestration and deterministic readiness audit separating electrical gates from unassessed production engineering | Finalization workflow, readiness gates, or report changes |
 | `src/copperbrain/services/pcb_phase.py` | Restart-safe aggregate placement, grounding, and routing workspace behind the single final PCB acceptance, with correlated routing metric IDs, preview, revalidation, atomic apply, and rollback | Three-gate orchestration or final PCB acceptance changes |
-| `src/copperbrain/services/outputs.py` | Enforces `copperbrain-output/`, rejects recursive output roots, validates filenames, strips VCS/history/backups/preferences/locks, and atomically publishes preview copies | Project-local output layout or publication rules change |
+| `src/copperbrain/services/outputs.py` | Enforces `copperbrain-output/`, rejects recursive output roots, validates filenames, strips VCS/history/backups/preferences/locks, and atomically maintains the bounded schematic/design-rules/PCB preview slots | Project-local output layout or publication rules change |
 | `src/copperbrain/services/bom.py` | BOM grouping, catalog enrichment, component-only estimates, and atomic JSON/CSV/Markdown rendering | BOM fields, cost assumptions, or export formats change |
 | `src/copperbrain/services/reference_design.py` | Bounded LM2596/LM5576 sections, 12→48 V LT3757A boost benchmark, brushed-motor benchmark, and compact DRV8311S BLDC benchmark, all expressed as typed operations/models | Reference topology, assumptions, placement, rules, or metadata changes |
-| `src/copperbrain/server.py` | Thin FastMCP stdio entry point exposing 53 tools and exactly three explicit acceptance gates: schematic, design rules, and aggregate PCB | MCP tools, gate count, or transport serialization change |
+| `src/copperbrain/server.py` | Thin FastMCP stdio entry point exposing 40 tools, three preview phases, and exactly three explicit acceptance gates: schematic, design rules, and aggregate PCB | MCP tools, preview/gate count, or transport serialization change |
 | `benchmark_bldc_drv8311/` | Generated 85×50 mm DRV8311S BLDC KiCad benchmark; user artifacts remain under its ignored `copperbrain-output/` tree | Compact BLDC fixture topology, placement, rules, or reproducible benchmark evidence changes |
 | `benchmark-test3/` | Gated 9–15 V to 48 V / 0.5 A LT3757A boost-converter benchmark and its ignored preview artifacts | Boost benchmark schematic, PCB, or reproducible connectivity metrics change |
 | `tests/` | Offline unit and adapter tests mirroring package responsibilities | Any tested behavior changes |
@@ -74,8 +74,9 @@ For product scope and architecture decisions, read [`DEVELOPMENT_PLAN.md`](../DE
 Real-project work follows the engineering sequence documented in `AGENTS.md`: intake/baseline,
 schematic and sourcing, PCB rules, placement, grounding/power structure, routing by explicit
 net class and bounded batch, then final validation/readiness. The public MCP has exactly three
-explicit acceptances: `accept_schematic`, `accept_design_rules`, and `accept_pcb`. Granular PCB
-operations are composed and validated in private workspaces before the aggregate PCB acceptance;
+explicit acceptances: `accept_schematic`, `accept_design_rules`, and `accept_pcb`. Published
+previews are bounded to the stable `schematic`, `design-rules`, and `pcb` slots. Granular PCB
+operations are composed without intermediate preview artifacts and validated in private workspaces;
 source hashes, preview, editor-state checks, snapshots, atomic replacement, and recovery remain.
 
 Every connectivity analysis, grounding check, router candidate, routing validation, and applicable

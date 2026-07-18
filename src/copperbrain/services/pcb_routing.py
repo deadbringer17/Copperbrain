@@ -151,6 +151,7 @@ class PcbRoutingService:
         drc_runner: Callable[[Path | None], DrcReport] | None = None,
         pdf_exporter: Callable[[Path, Path], Path] | None = None,
         routing_backend: RoutingBackend | None = None,
+        publish_artifacts: bool = True,
     ) -> None:
         self.projects = projects
         self.data_dir = data_dir
@@ -160,6 +161,7 @@ class PcbRoutingService:
             lambda pcb, destination: export_pcb_pdf(detect_kicad().selected_cli, pcb, destination)
         )
         self.routing_backend = routing_backend or FreeRoutingAdapter.discover(data_dir)
+        self.publish_artifacts = publish_artifacts
         self.metrics = ConnectivityMetricsStore(data_dir)
         self._changes: dict[str, _PreparedRouting] = {}
 
@@ -1454,8 +1456,14 @@ class PcbRoutingService:
         validation, drc, routing = self._validate_workspace(
             session, temporary_pcb, plan.target_nets, plan.request.require_complete
         )
-        pdf = self.pdf_exporter(temporary_pcb, workspace / "Copperbrain-PCB-routing-preview.pdf")
-        preview_directory = publish_preview(workspace, session.root, identifier)
+        preview_directory = workspace
+        preview_pdf = None
+        if self.publish_artifacts:
+            pdf = self.pdf_exporter(
+                temporary_pcb, workspace / "Copperbrain-PCB-routing-preview.pdf"
+            )
+            preview_directory = publish_preview(workspace, session.root, identifier)
+            preview_pdf = preview_directory / pdf.relative_to(workspace)
         status = ChangeStatus.VALIDATED if validation.valid else ChangeStatus.PREPARED
         change_set = PcbRoutingChangeSet(
             id=identifier,
@@ -1487,7 +1495,7 @@ class PcbRoutingService:
             drc=drc,
             routing_analysis=routing,
             preview_directory=preview_directory,
-            preview_pdf=preview_directory / pdf.relative_to(workspace),
+            preview_pdf=preview_pdf,
             status=status,
         )
         self._changes[identifier] = _PreparedRouting(change_set, workspace)

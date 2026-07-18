@@ -42,7 +42,11 @@ from copperbrain.models import (
     ProjectSession,
     ValidationReport,
 )
-from copperbrain.services.outputs import PROJECT_COPY_IGNORE, publish_preview
+from copperbrain.services.outputs import (
+    PROJECT_COPY_IGNORE,
+    publish_preview,
+    require_current_preview,
+)
 from copperbrain.services.projects import ProjectService, aggregate_hash, hash_file
 
 _POWER = re.compile(r"(?:^|[/_])(?:GND|AGND|DGND|VCC|VDD|VBAT|VIN|VOUT|VREF|\+\d+V)", re.I)
@@ -646,7 +650,7 @@ class PcbRuleService:
         validation, drc = self._validate_workspace(
             session, temporary_project, temporary_rule, temporary_pcb, rule_set
         )
-        preview = publish_preview(workspace, session.root, identifier)
+        preview = publish_preview(workspace, session.root, identifier, phase="design-rules")
         affected = (session.project_file, live_rule, *live_footprints)
         status = ChangeStatus.VALIDATED if validation.valid else ChangeStatus.PREPARED
         change_set = PcbRuleChangeSet(
@@ -726,6 +730,7 @@ class PcbRuleService:
         change_set = prepared.change_set
         if change_set.status is not ChangeStatus.VALIDATED:
             raise CopperbrainError(ErrorCode.VALIDATION_FAILED, "PCB rule change is not validated")
+        require_current_preview(change_set.preview_directory, change_set.id)
         session = self.projects.get_session(change_set.session_id)
         if not editor_closed or _editor_lock_exists(session.root):
             raise CopperbrainError(

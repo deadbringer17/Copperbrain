@@ -54,9 +54,8 @@ To demonstrate controlled PCB routing after rules and placement are ready:
 3. call `propose_pcb_routing` with exact nets or an empty list for every routable net, then compare
    completion, DRC regression, open-connection, via, length, and per-pass work-queue metrics for the candidates; a
    non-empty list is enforced in the exported DSN so unrelated nets are not routed silently;
-4. pass the selected typed plan to `prepare_routing_change` and review the PDF, semantic diff,
-   connectivity result, assumptions, and comparative DRC;
-5. combine the reviewed routing batches with grounding in `prepare_pcb_acceptance`, inspect its
+4. combine the reviewed routing requests with placement and grounding in `prepare_pcb_acceptance`;
+5. inspect its
    single preview, and rerun `validate_pcb_acceptance`;
 6. save and close PCB Editor, call `accept_pcb`, then optionally demonstrate byte-exact recovery
    with `rollback_accepted_phase` and `phase=pcb`.
@@ -64,7 +63,7 @@ To demonstrate controlled PCB routing after rules and placement are ready:
 The generated geometry is not an SI/PI/EMC, thermal, impedance, or regulatory certification.
 
 `prepare_schematic_change` returns the project-local preview directory under
-`copperbrain-output/previews/<change-set-id>/`, including `Copperbrain-preview.pdf`.
+`copperbrain-output/previews/schematic/`, including `Copperbrain-preview.pdf`.
 `generate_bom` writes all three formats to `copperbrain-output/bom/` by default. If one format is
 requested, an optional destination is interpreted only as a simple filename in that same folder.
 

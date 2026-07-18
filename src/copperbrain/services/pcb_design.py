@@ -102,6 +102,7 @@ class PcbDesignService:
         drc_runner: Callable[[Path | None], DrcReport] | None = None,
         pdf_exporter: Callable[[Path, Path], Path] | None = None,
         zone_refiller: Callable[[Path], None] | None = None,
+        publish_artifacts: bool = True,
     ) -> None:
         self.projects = projects
         self.data_dir = data_dir
@@ -112,6 +113,7 @@ class PcbDesignService:
             lambda pcb, destination: export_pcb_pdf(detect_kicad().selected_cli, pcb, destination)
         )
         self.zone_refiller = zone_refiller
+        self.publish_artifacts = publish_artifacts
         self._changes: dict[str, _PreparedPlacement] = {}
 
     @property
@@ -527,9 +529,12 @@ class PcbDesignService:
         if self.zone_refiller is not None:
             self.zone_refiller(temporary_pcb)
         validation, drc = self._validate_workspace(session, temporary_pcb)
-        pdf = self.pdf_exporter(temporary_pcb, workspace / "Copperbrain-PCB-preview.pdf")
-        preview_directory = publish_preview(workspace, session.root, identifier)
-        preview_pdf = preview_directory / pdf.relative_to(workspace)
+        preview_directory = workspace
+        preview_pdf = None
+        if self.publish_artifacts:
+            pdf = self.pdf_exporter(temporary_pcb, workspace / "Copperbrain-PCB-preview.pdf")
+            preview_directory = publish_preview(workspace, session.root, identifier)
+            preview_pdf = preview_directory / pdf.relative_to(workspace)
         status = ChangeStatus.VALIDATED if validation.valid else ChangeStatus.PREPARED
         change_set = PcbPlacementChangeSet(
             id=identifier,

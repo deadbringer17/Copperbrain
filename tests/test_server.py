@@ -68,24 +68,11 @@ def test_server_exposes_complete_mvp_contract() -> None:
         "get_footprint_placement",
         "analyze_placement",
         "propose_component_placement",
-        "prepare_placement_change",
-        "validate_placement_change",
-        "grounding_pcb",
-        "validate_grounding_pcb",
-        "export_pcb_preview",
         "get_routing_backend_status",
         "get_connectivity_metrics",
         "analyze_unrouted_nets",
         "propose_pcb_routing",
-        "prepare_routing_change",
-        "validate_routing_change",
-        "get_routing_change_summary",
         "assess_pcb_readiness",
-        "prepare_pcb_finalization",
-        "validate_pcb_finalization",
-        "get_pcb_finalization_report",
-        "prepare_pcb_layout_change",
-        "validate_pcb_layout_change",
         "search_components",
         "get_component_details",
         "compare_components",
@@ -106,6 +93,27 @@ def test_server_exposes_exactly_three_explicit_acceptance_gates() -> None:
         name for name, tool in tools.items() if "confirmed" in tool.parameters.get("properties", {})
     }
     assert confirmed_tools == {"accept_schematic", "accept_design_rules", "accept_pcb"}
+
+
+def test_server_exposes_only_three_preview_phases() -> None:
+    tools = set(mcp._tool_manager._tools)
+    assert tools & {
+        "prepare_project_creation",
+        "prepare_schematic_change",
+        "prepare_pcb_rule_change",
+        "prepare_pcb_acceptance",
+        "prepare_placement_change",
+        "grounding_pcb",
+        "export_pcb_preview",
+        "prepare_routing_change",
+        "prepare_pcb_finalization",
+        "prepare_pcb_layout_change",
+    } == {
+        "prepare_project_creation",
+        "prepare_schematic_change",
+        "prepare_pcb_rule_change",
+        "prepare_pcb_acceptance",
+    }
 
 
 def test_aggregate_acceptance_transport_wrappers(monkeypatch: pytest.MonkeyPatch) -> None:

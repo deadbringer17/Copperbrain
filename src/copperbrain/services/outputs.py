@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import uuid
 from pathlib import Path
+from typing import Literal
 
 from copperbrain.errors import CopperbrainError
 from copperbrain.models import ErrorCode
 
 OUTPUT_DIRECTORY = "copperbrain-output"
+PreviewPhase = Literal["schematic", "design-rules", "pcb"]
+PREVIEW_PHASES = frozenset({"schematic", "design-rules", "pcb"})
+PREVIEW_MARKER = ".copperbrain-preview.json"
 PROJECT_COPY_IGNORE = shutil.ignore_patterns(
     OUTPUT_DIRECTORY,
     ".git",
@@ -62,20 +67,72 @@ def output_path(project_root: Path, category: str, filename: str) -> Path:
     return destination
 
 
-def publish_preview(workspace: Path, project_root: Path, identifier: str) -> Path:
+def publish_preview(
+    workspace: Path,
+    project_root: Path,
+    identifier: str,
+    *,
+    phase: PreviewPhase | None = None,
+) -> Path:
     """Atomically publish a prepared project copy below the live project's output folder."""
     if not identifier or Path(identifier).name != identifier:
         raise CopperbrainError(ErrorCode.INVALID_INPUT, "Invalid preview identifier")
     parent = project_output_root(project_root) / "previews"
     parent.mkdir(parents=True, exist_ok=True)
-    destination = parent / identifier
-    if destination.exists():
+    destination = parent / (phase or identifier)
+    if destination.exists() and phase is None:
         raise CopperbrainError(ErrorCode.CONFLICT, "Preview output already exists")
     temporary = parent / f".{identifier}.{uuid.uuid4().hex}.tmp"
+    previous = parent / f".{destination.name}.{uuid.uuid4().hex}.previous"
     try:
         shutil.copytree(workspace, temporary, ignore=PROJECT_COPY_IGNORE)
+        if phase is not None:
+            (temporary / PREVIEW_MARKER).write_text(
+                json.dumps(
+                    {"schema_version": 1, "phase": phase, "change_set_id": identifier},
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        if destination.exists():
+            os.replace(destination, previous)
         os.replace(temporary, destination)
+        if previous.exists():
+            shutil.rmtree(previous)
+        if phase is not None:
+            for obsolete in parent.iterdir():
+                if obsolete.name in PREVIEW_PHASES or obsolete.name.startswith("."):
+                    continue
+                if obsolete.is_symlink() or obsolete.is_file():
+                    obsolete.unlink()
+                elif obsolete.is_dir():
+                    shutil.rmtree(obsolete)
+    except Exception:
+        if previous.exists() and not destination.exists():
+            os.replace(previous, destination)
+        raise
     finally:
         if temporary.exists():
             shutil.rmtree(temporary)
+        if previous.exists():
+            shutil.rmtree(previous)
     return destination
+
+
+def require_current_preview(preview_directory: Path, change_set_id: str) -> None:
+    """Refuse an acceptance when its bounded phase slot has since been replaced."""
+    try:
+        marker = json.loads((preview_directory / PREVIEW_MARKER).read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        raise CopperbrainError(
+            ErrorCode.CONFLICT,
+            "The reviewed phase preview is unavailable or invalid",
+            actionable_hint="Prepare and review the phase again before accepting it.",
+        ) from exc
+    if marker.get("change_set_id") != change_set_id:
+        raise CopperbrainError(
+            ErrorCode.CONFLICT,
+            "The reviewed phase preview has been superseded",
+            actionable_hint="Accept the current preview or prepare the phase again.",
+        )

@@ -15,6 +15,7 @@ from copperbrain.models import (
     RoutingRequest,
     ValidationReport,
 )
+from copperbrain.services.outputs import publish_preview
 from copperbrain.services.pcb_phase import PcbPhaseService, _PreparedPcbPhase
 from copperbrain.services.projects import ProjectService, aggregate_hash
 
@@ -61,12 +62,13 @@ def test_aggregate_pcb_acceptance_is_atomic_persistent_and_reversible(
         validation_report=ValidationReport(valid=True),
         drc=DrcReport(available=True),
         routing_analysis=service.adapter.analyze_routing(session.pcb_file, session.id),
-        preview_directory=project_root / "copperbrain-output" / "previews" / identifier,
+        preview_directory=project_root / "copperbrain-output" / "previews" / "pcb",
         status=ChangeStatus.VALIDATED,
     )
     prepared = _PreparedPcbPhase(change_set=change_set, workspace=workspace)
     service._changes[identifier] = prepared
     service._persist(prepared, project_root)
+    publish_preview(workspace, project_root, identifier, phase="pcb")
 
     with pytest.raises(CopperbrainError, match="acceptance"):
         service.apply(identifier, confirmed=False, editor_closed=True)

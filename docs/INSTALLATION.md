@@ -62,19 +62,18 @@ then call `accept_schematic` with `confirmed=true` and `editor_closed=true`. Cop
 source hashes again, refuses lock files, snapshots affected files and uses atomic replacement.
 Recovery is an explicit `rollback_accepted_phase` invocation.
 
-PCB placement evidence uses `prepare_placement_change` and `validate_placement_change`, then feeds
-the operations into `prepare_pcb_acceptance`; no separate placement gate is exposed. PDF
-preview and DRC work without an open editor. For optional live IPC access, enable the API server
+PCB placement operations feed directly into `prepare_pcb_acceptance`; placement, grounding, and
+routing are applied to its private workspace without intermediate previews. For optional live IPC access, enable the API server
 in KiCad preferences and open the intended board in PCB Editor; Copperbrain refuses an IPC board
 whose resolved path does not match the expected temporary workspace file.
 
-Empty-board initialization uses `prepare_pcb_layout_change` and `validate_pcb_layout_change`. Its
-input is a typed complete placement plan; it does not accept KiCad syntax or generate routing. The
-reviewed PCB work is applied only through the aggregate PCB acceptance.
+Empty-board initialization is an internal composition step driven by a typed complete placement
+plan; it does not accept KiCad syntax or generate routing. Reviewed PCB work is published and
+applied only through the aggregate PCB acceptance.
 
 Controlled routing uses `get_routing_backend_status`, `analyze_unrouted_nets`,
-`propose_pcb_routing`, `prepare_routing_change`, and `validate_routing_change`. The reviewed
-batches and grounding are composed by `prepare_pcb_acceptance`, revalidated, and applied once by
+`propose_pcb_routing`. The reviewed requests, placement, and grounding are composed by
+`prepare_pcb_acceptance`, revalidated, and applied once by
 `accept_pcb`. FreeRouting works only in private DSN/SES workspaces; Copperbrain
 imports its result, refuses changed existing copper, and exposes typed segment/via deltas only.
 KiCad refills zones on both the imported candidate and prepared typed copy before comparative DRC;
@@ -95,7 +94,9 @@ inside the opened project:
 
 ```text
 copperbrain-output/
-  previews/<change-set-id>/   validated project copy and schematic/PCB preview PDF
+  previews/schematic/         current schematic checkpoint and PDF
+  previews/design-rules/      current rules checkpoint
+  previews/pcb/               current aggregate PCB checkpoint and PDF
   bom/                        Copperbrain-BOM.json, .csv, and .md
 ```
 

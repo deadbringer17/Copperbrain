@@ -8,6 +8,7 @@ from copperbrain.services.outputs import (
     output_path,
     project_output_root,
     publish_preview,
+    require_current_preview,
 )
 
 
@@ -59,3 +60,29 @@ def test_publish_preview_rejects_recursive_output_root(tmp_path: Path) -> None:
 
     with pytest.raises(CopperbrainError, match="cannot be used as a source"):
         publish_preview(workspace, output_copy, "nested")
+
+
+def test_phase_previews_replace_the_same_three_bounded_slots(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    workspace = tmp_path / "workspace"
+    project.mkdir()
+    workspace.mkdir()
+    source = workspace / "demo.kicad_sch"
+    legacy = project / OUTPUT_DIRECTORY / "previews" / "old-change-set-id"
+    legacy.mkdir(parents=True)
+    (legacy / "stale.txt").write_text("stale", encoding="utf-8")
+
+    for phase in ("schematic", "design-rules", "pcb"):
+        source.write_text(f"first-{phase}", encoding="utf-8")
+        first = publish_preview(workspace, project, f"first-{phase}", phase=phase)
+        source.write_text(f"second-{phase}", encoding="utf-8")
+        second = publish_preview(workspace, project, f"second-{phase}", phase=phase)
+
+        assert first == second == project / OUTPUT_DIRECTORY / "previews" / phase
+        assert (second / source.name).read_text(encoding="utf-8") == f"second-{phase}"
+        require_current_preview(second, f"second-{phase}")
+        with pytest.raises(CopperbrainError, match="superseded"):
+            require_current_preview(first, f"first-{phase}")
+
+    published = project / OUTPUT_DIRECTORY / "previews"
+    assert {item.name for item in published.iterdir()} == {"schematic", "design-rules", "pcb"}

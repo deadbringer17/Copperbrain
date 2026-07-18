@@ -29,7 +29,11 @@ from copperbrain.models import (
     SchematicReadabilityReport,
     ValidationReport,
 )
-from copperbrain.services.outputs import PROJECT_COPY_IGNORE, publish_preview
+from copperbrain.services.outputs import (
+    PROJECT_COPY_IGNORE,
+    publish_preview,
+    require_current_preview,
+)
 from copperbrain.services.projects import ProjectService, aggregate_hash, hash_file
 
 
@@ -277,7 +281,7 @@ class ChangeService:
             readability_required=readability_required,
         )
         self.pdf_exporter(temporary_schematic, workspace / "Copperbrain-preview.pdf")
-        preview_directory = publish_preview(workspace, session.root, identifier)
+        preview_directory = publish_preview(workspace, session.root, identifier, phase="schematic")
         semantic_diff = tuple(
             f"{operation.kind}: {operation.target} ({', '.join(sorted(operation.parameters))})"
             for operation in operations
@@ -352,6 +356,7 @@ class ChangeService:
         change_set = prepared.change_set
         if change_set.status is not ChangeStatus.VALIDATED:
             raise CopperbrainError(ErrorCode.VALIDATION_FAILED, "Change set is not validated")
+        require_current_preview(change_set.preview_directory, change_set.id)
         session = self.projects.get_session(change_set.session_id)
         if not editor_closed or _editor_lock_exists(session.root):
             raise CopperbrainError(

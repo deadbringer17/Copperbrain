@@ -176,6 +176,7 @@ class PcbGroundingService:
         grounding_adapter: KiCadGroundingAdapter | None = None,
         drc_runner: Callable[[Path | None], DrcReport] | None = None,
         pdf_exporter: Callable[[Path, Path], Path] | None = None,
+        publish_artifacts: bool = True,
     ) -> None:
         self.projects = projects
         self.design = design
@@ -186,6 +187,7 @@ class PcbGroundingService:
         self.pdf_exporter = pdf_exporter or (
             lambda pcb, destination: export_pcb_pdf(detect_kicad().selected_cli, pcb, destination)
         )
+        self.publish_artifacts = publish_artifacts
         self._changes: dict[str, _PreparedGrounding] = {}
 
     @property
@@ -1162,9 +1164,12 @@ class PcbGroundingService:
             }
         )
         validation, drc, analysis = self._validate_workspace(session, temporary_pcb, plan)
-        pdf = self.pdf_exporter(temporary_pcb, workspace / "Copperbrain-grounding-preview.pdf")
-        preview_directory = publish_preview(workspace, session.root, identifier)
-        preview_pdf = preview_directory / pdf.relative_to(workspace)
+        preview_directory = workspace
+        preview_pdf = None
+        if self.publish_artifacts:
+            pdf = self.pdf_exporter(temporary_pcb, workspace / "Copperbrain-grounding-preview.pdf")
+            preview_directory = publish_preview(workspace, session.root, identifier)
+            preview_pdf = preview_directory / pdf.relative_to(workspace)
         status = ChangeStatus.VALIDATED if validation.valid else ChangeStatus.PREPARED
         change_set = PcbGroundingChangeSet(
             id=identifier,

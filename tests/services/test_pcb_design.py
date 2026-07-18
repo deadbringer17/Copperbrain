@@ -129,6 +129,20 @@ def test_prepare_apply_and_byte_exact_rollback(
     assert pcb.read_bytes() == original
 
 
+def test_private_placement_prepare_skips_preview_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _pcb, session = setup(tmp_path, monkeypatch)
+    service.publish_artifacts = False
+    service.pdf_exporter = lambda *_args: pytest.fail("private prepare exported a PDF")
+
+    change = service.prepare(session, (PlacementOperation(reference="R1", x_mm=15, y_mm=15),))
+
+    assert change.preview_pdf is None
+    assert change.preview_directory.is_relative_to(tmp_path / "data" / "workspaces")
+    assert not (tmp_path / "project" / "copperbrain-output").exists()
+
+
 def test_placement_can_apply_and_rollback_after_service_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

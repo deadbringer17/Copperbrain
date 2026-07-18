@@ -26,7 +26,11 @@ from copperbrain.models import (
     ProjectSession,
     ValidationReport,
 )
-from copperbrain.services.outputs import PROJECT_COPY_IGNORE, publish_preview
+from copperbrain.services.outputs import (
+    PROJECT_COPY_IGNORE,
+    publish_preview,
+    require_current_preview,
+)
 from copperbrain.services.pcb_design import PcbDesignService
 from copperbrain.services.pcb_grounding import PcbGroundingService
 from copperbrain.services.pcb_routing import PcbRoutingService
@@ -187,12 +191,16 @@ class PcbPhaseService:
             workspace_projects,
             child_data,
             zone_refiller=self.routing_backend.refill_zones,
+            publish_artifacts=False,
         )
-        grounding = PcbGroundingService(workspace_projects, design, child_data)
+        grounding = PcbGroundingService(
+            workspace_projects, design, child_data, publish_artifacts=False
+        )
         routing = PcbRoutingService(
             workspace_projects,
             self.data_dir,
             routing_backend=self.routing_backend,
+            publish_artifacts=False,
         )
 
         if request.placement_operations:
@@ -284,7 +292,7 @@ class PcbPhaseService:
             temporary_pcb,
             workspace / "Copperbrain-PCB-acceptance-preview.pdf",
         )
-        preview = publish_preview(workspace, session.root, identifier)
+        preview = publish_preview(workspace, session.root, identifier, phase="pcb")
         live_pcb = session.pcb_file
         change_set = PcbPhaseChangeSet(
             id=identifier,
@@ -362,6 +370,7 @@ class PcbPhaseService:
         change_set = prepared.change_set
         if change_set.status is not ChangeStatus.VALIDATED:
             raise CopperbrainError(ErrorCode.VALIDATION_FAILED, "PCB phase is not validated")
+        require_current_preview(change_set.preview_directory, change_set.id)
         session = self.projects.get_session(change_set.session_id)
         if not editor_closed or _editor_lock_exists(session.root):
             raise CopperbrainError(

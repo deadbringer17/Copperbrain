@@ -26,6 +26,7 @@ from copperbrain.models import (
 from copperbrain.services.outputs import (
     OUTPUT_DIRECTORY,
     publish_preview,
+    require_current_preview,
     require_source_project_root,
 )
 from copperbrain.services.projects import hash_file
@@ -161,7 +162,7 @@ class ProjectCreationService:
         workspace.parent.mkdir(parents=True, exist_ok=True)
         self.adapter.create(workspace, spec)
         validation = self._validate(workspace, spec)
-        preview_directory = publish_preview(workspace, target_root, identifier)
+        preview_directory = publish_preview(workspace, target_root, identifier, phase="schematic")
         affected = tuple(
             target_root / f"{spec.name}{suffix}"
             for suffix in (".kicad_pro", ".kicad_sch", ".kicad_pcb")
@@ -206,6 +207,7 @@ class ProjectCreationService:
             raise CopperbrainError(
                 ErrorCode.VALIDATION_FAILED, "Project creation change set is not validated"
             )
+        require_current_preview(change_set.preview_directory, change_set.id)
         self._ensure_available_target(change_set.target_root)
         change_set.target_root.mkdir(parents=True, exist_ok=True)
         copied: list[Path] = []

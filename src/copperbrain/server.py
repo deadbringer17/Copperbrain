@@ -369,7 +369,6 @@ def propose_component_placement(session_id: str, request: dict[str, object]) -> 
     return pcb_design.propose(session_id, normalized).model_dump(mode="json")
 
 
-@mcp.tool()
 def prepare_placement_change(
     session_id: str, operations: list[dict[str, object]]
 ) -> dict[str, object]:
@@ -378,7 +377,6 @@ def prepare_placement_change(
     return pcb_design.prepare(session_id, normalized).model_dump(mode="json")
 
 
-@mcp.tool()
 def validate_placement_change(change_set_id: str) -> dict[str, object]:
     """Reparse and rerun DRC against a prepared placement workspace."""
     validation, drc = pcb_design.validate(change_set_id)
@@ -406,14 +404,12 @@ def rollback_placement_change(
     ).model_dump(mode="json")
 
 
-@mcp.tool()
 def grounding_pcb(session_id: str, request: dict[str, object] | None = None) -> dict[str, object]:
     """Prepare two-layer-default shaped, bridge-connected ground domains in a private preview."""
     normalized = GroundingRequest.model_validate(request or {})
     return pcb_grounding.prepare(session_id, normalized).model_dump(mode="json")
 
 
-@mcp.tool()
 def validate_grounding_pcb(change_set_id: str) -> dict[str, object]:
     """Reparse, inspect ground connectivity, and rerun DRC on a grounding preview."""
     validation, drc, analysis = pcb_grounding.validate(change_set_id)
@@ -442,7 +438,6 @@ def rollback_grounding_pcb(
     ).model_dump(mode="json")
 
 
-@mcp.tool()
 def export_pcb_preview(session_id: str) -> dict[str, object]:
     """Export a read-only PCB PDF below copperbrain-output/previews/."""
     return {"preview_pdf": str(pcb_design.export_preview(session_id))}
@@ -473,14 +468,12 @@ def propose_pcb_routing(session_id: str, request: dict[str, object]) -> dict[str
     return pcb_routing.propose(session_id, normalized).model_dump(mode="json")
 
 
-@mcp.tool()
 def prepare_routing_change(session_id: str, plan: dict[str, object]) -> dict[str, object]:
     """Route a private PCB copy, publish a preview, and run comparative DRC."""
     normalized = RoutingPlan.model_validate(plan)
     return pcb_routing.prepare(session_id, normalized).model_dump(mode="json")
 
 
-@mcp.tool()
 def validate_routing_change(change_set_id: str) -> dict[str, object]:
     """Reparse connectivity and rerun DRC against a prepared routing workspace."""
     validation, drc, analysis = pcb_routing.validate(change_set_id)
@@ -524,7 +517,6 @@ def restore_routing_snapshot(
     ).model_dump(mode="json")
 
 
-@mcp.tool()
 def get_routing_change_summary(change_set_id: str) -> dict[str, object]:
     """Resume a routing change if needed and return compact review evidence."""
     return pcb_routing.review(change_set_id).model_dump(mode="json")
@@ -536,7 +528,6 @@ def assess_pcb_readiness(session_id: str) -> dict[str, object]:
     return pcb_finalization.assess(session_id).model_dump(mode="json")
 
 
-@mcp.tool()
 def prepare_pcb_finalization(
     session_id: str, routing_request: dict[str, object]
 ) -> dict[str, object]:
@@ -545,7 +536,6 @@ def prepare_pcb_finalization(
     return pcb_finalization.prepare(session_id, request).model_dump(mode="json")
 
 
-@mcp.tool()
 def validate_pcb_finalization(change_set_id: str) -> dict[str, object]:
     """Revalidate a persisted PCB finalization change after any MCP restart."""
     return pcb_finalization.validate(change_set_id).model_dump(mode="json")
@@ -562,20 +552,17 @@ def apply_pcb_finalization(
     ).model_dump(mode="json")
 
 
-@mcp.tool()
 def get_pcb_finalization_report(change_set_id: str) -> dict[str, object]:
     """Return the current compact report for a persisted finalization change."""
     return pcb_finalization.report(change_set_id).model_dump(mode="json")
 
 
-@mcp.tool()
 def prepare_pcb_layout_change(session_id: str, plan: dict[str, object]) -> dict[str, object]:
     """Headlessly build a typed, unrouted PCB preview from the project schematic."""
     normalized = PcbLayoutPlan.model_validate(plan)
     return pcb_layout.prepare(session_id, normalized).model_dump(mode="json")
 
 
-@mcp.tool()
 def validate_pcb_layout_change(change_set_id: str) -> dict[str, object]:
     """Revalidate schematic, PCB, ERC, DRC, and placement in a prepared workspace."""
     validation, erc, drc, analysis = pcb_layout.validate(change_set_id)
