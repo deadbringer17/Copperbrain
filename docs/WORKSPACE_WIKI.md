@@ -14,7 +14,7 @@ For product scope and public contracts, read [`README.md`](../README.md). For ag
 | `src/copperbrain/cli.py` | Default MCP-server launch plus explicit maintenance commands such as the guarded source updater | CLI dispatch or maintenance command behavior changes |
 | `README.md` | Installation, server launch, and user-facing workflow | Setup or public usage changes |
 | `assets/copperbrain-mcp-icon*.png` | Square Copperbrain MCP icons combining a protected shield, brain, and PCB traces; the `kicad-style` variant adds blue EDA styling | MCP branding or icon artwork changes |
-| `.gitignore` | Excludes virtual environments, caches, runtime databases, locks, and generated fabrication outputs | Generated/local artifact policy changes |
+| `.gitignore` | Excludes virtual environments, developer scratch trees, caches, runtime databases, locks, and generated fabrication outputs | Generated/local artifact policy changes |
 | `src/copperbrain/models.py` | Immutable Pydantic domain and boundary contracts | Public data contracts or shared domain values change |
 | `src/copperbrain/errors.py` | Stable actionable application errors | Error taxonomy or mapping changes |
 | `src/copperbrain/config.py` | Explicit environment-backed runtime settings | Cache, data, download, or timeout configuration changes |

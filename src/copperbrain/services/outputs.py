@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
@@ -26,6 +28,18 @@ PROJECT_COPY_IGNORE = shutil.ignore_patterns(
     ".*.lck",
     "~*.lck",
 )
+
+
+def _remove_tree(path: Path) -> None:
+    """Remove generated trees even when Windows preserved read-only VCS objects."""
+
+    def make_writable_and_retry(
+        function: Callable[[str], object], name: str, _error: object
+    ) -> None:
+        os.chmod(name, stat.S_IWRITE)
+        function(name)
+
+    shutil.rmtree(path, onerror=make_writable_and_retry)
 
 
 def is_output_tree(path: Path) -> bool:
@@ -99,7 +113,7 @@ def publish_preview(
             os.replace(destination, previous)
         os.replace(temporary, destination)
         if previous.exists():
-            shutil.rmtree(previous)
+            _remove_tree(previous)
         if phase is not None:
             for obsolete in parent.iterdir():
                 if obsolete.name in PREVIEW_PHASES or obsolete.name.startswith("."):
@@ -107,16 +121,16 @@ def publish_preview(
                 if obsolete.is_symlink() or obsolete.is_file():
                     obsolete.unlink()
                 elif obsolete.is_dir():
-                    shutil.rmtree(obsolete)
+                    _remove_tree(obsolete)
     except Exception:
         if previous.exists() and not destination.exists():
             os.replace(previous, destination)
         raise
     finally:
         if temporary.exists():
-            shutil.rmtree(temporary)
+            _remove_tree(temporary)
         if previous.exists():
-            shutil.rmtree(previous)
+            _remove_tree(previous)
     return destination
 
 

@@ -227,9 +227,21 @@ class PcbPhaseService:
         child_ids.append(grounding_change.id)
         semantic_diff.extend(grounding_change.semantic_diff)
         workspace_session = workspace_projects.open_project(workspace)
+        reviewed_ground_planes = tuple(
+            sorted(
+                domain.net_name for domain in grounding_change.plan.domains if domain.plane_layers
+            )
+        )
 
         for batch in request.routing_batches:
-            plan = routing.propose(workspace_session.id, batch)
+            routing_batch = batch.model_copy(
+                update={
+                    "excluded_plane_nets": tuple(
+                        sorted(set(batch.excluded_plane_nets) | set(reviewed_ground_planes))
+                    )
+                }
+            )
+            plan = routing.propose(workspace_session.id, routing_batch)
             if plan.metrics_run_id is not None:
                 metrics_run_ids.append(plan.metrics_run_id)
             routing_change = routing.prepare(workspace_session.id, plan)

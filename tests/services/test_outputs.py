@@ -1,3 +1,4 @@
+import stat
 from pathlib import Path
 
 import pytest
@@ -70,7 +71,10 @@ def test_phase_previews_replace_the_same_three_bounded_slots(tmp_path: Path) -> 
     source = workspace / "demo.kicad_sch"
     legacy = project / OUTPUT_DIRECTORY / "previews" / "old-change-set-id"
     legacy.mkdir(parents=True)
-    (legacy / "stale.txt").write_text("stale", encoding="utf-8")
+    stale = legacy / ".history" / ".git" / "objects" / "stale"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("stale", encoding="utf-8")
+    stale.chmod(stat.S_IREAD)
 
     for phase in ("schematic", "design-rules", "pcb"):
         source.write_text(f"first-{phase}", encoding="utf-8")

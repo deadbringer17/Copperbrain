@@ -245,15 +245,19 @@ After rules and placement/grounding intent are reviewed, use `analyze_unrouted_n
 to identify the remaining disconnected pad groups. Ground-zone connectivity is included, so the
 router does not redundantly route pads already joined by an applied plane. Check
 `get_routing_backend_status`, then call `propose_pcb_routing`. FreeRouting consumes KiCad's
-official Specctra DSN and returns one or two isolated candidates. Copperbrain ranks them by
-completion, new DRC errors, open connections, vias, and routed length. Only the selected
+official Specctra DSN and runs at most three isolated attempts: prioritized, sequential, and a
+single-thread prioritized configuration. Three attempts are used by default and a request for a
+fourth is rejected. Copperbrain ranks the candidates by completion, new DRC errors, open
+connections, vias, and routed length. Only the selected
 candidate's copper delta becomes typed segments and vias; there is no internal routing fallback.
 Reviewed grounding domains are omitted only from FreeRouting's private DSN input so plane copper
 does not obstruct signal search. Their exact netlist remains present, and the selected typed copper
 is applied to the already-grounded private board, followed by KiCad zone refill and comparative DRC.
-Fine-pitch escape stubs are opt-in per routing batch. When enabled, Copperbrain derives short typed
-segments from pad and courtyard geometry, includes them in the private router input, and subjects
-the resulting complete copper delta to the same scope, preservation, connectivity, and DRC gates.
+Fine-pitch escape geometry is opt-in per routing batch. When enabled, Copperbrain derives short
+typed stubs from pad and courtyard geometry and, for a nearby opposite-side target, a clearance-
+offset dogbone via with an outside-courtyard approach. It includes these seeds in the private router
+input and subjects the resulting complete copper delta to the same scope, preservation,
+connectivity, and DRC gates.
 When `nets` is empty, Copperbrain materializes the exact currently-unrouted net set before DSN
 export. FreeRouting retains non-target net and plane geometry but moves those nets into generated
 preserve classes during scope validation. The upstream FreeRouting 2.2.4 CLI parses `-inc` but does
@@ -263,8 +267,11 @@ exclusion works. Every imported result is rejected if it removes existing copper
 outside the requested net set.
 
 Pass the reviewed routing requests with placement and grounding to `prepare_pcb_acceptance`.
-Copperbrain composes typed copper, refills zones, rechecks connectivity, and runs comparative DRC
-inside one private workspace without routing previews. Only the complete aggregate publishes
+Copperbrain stops after the bounded candidate comparison, applies only the best candidate to the
+private prepared PCB, refills zones, rechecks connectivity, and runs comparative DRC inside one
+private workspace without routing previews. It does not keep retrying to obtain a complete route.
+Final engineering cleanup and the explicit decision to apply the prepared PCB remain with the
+user. Only the complete aggregate publishes
 `copperbrain-output/previews/pcb/` and can be applied by `accept_pcb` with the third acceptance and
 a closed editor. The KiCad Project Manager may remain open; only a PCB-document lock blocks the
 aggregate apply/rollback. Boards containing pre-existing copper are rejected by default; explicitly select the
@@ -279,7 +286,7 @@ normalization evidence. The returned
 `RoutingPlan.metrics_run_id` correlates those records with preview, apply, and recovery.
 Call `get_connectivity_metrics` with that ID for a bounded, sanitized optimization view including
 the best observed pass, connection delta, failed-candidate count, stagnation, and watchdog causes.
-New records use schema 3 while the reader remains compatible with persisted schema-2 records.
+New records use schema 4 while the reader remains compatible with persisted schema-2 records.
 
 For the compact end-to-end surface, call `prepare_pcb_acceptance`, review its preview, then use
 `validate_pcb_acceptance` and `accept_pcb`. `assess_pcb_readiness` intentionally keeps
