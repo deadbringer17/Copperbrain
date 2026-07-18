@@ -45,6 +45,20 @@ def test_generate_enrich_and_estimate_bom() -> None:
     assert missing.missing_prices == ("C1",)
 
 
+def test_generate_bom_orders_groups_by_lowest_reference() -> None:
+    components = (
+        Component(reference="R2", value="10k", footprint="R_0603", properties={}),
+        Component(reference="R10", value="1k", footprint="R_0603", properties={}),
+        Component(reference="R1", value="10k", footprint="R_0603", properties={}),
+    )
+    lines = generate_bom(
+        ProjectSummary(
+            session_id="s", sheets=("x",), components=components, nets=(), power_symbols=()
+        )
+    )
+    assert [line.references for line in lines] == [("R1", "R2"), ("R10",)]
+
+
 @pytest.mark.parametrize("output_format", ["json", "csv", "markdown"])
 def test_render_and_export_bom(tmp_path: Path, output_format: str) -> None:
     lines = generate_bom(summary())

@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -154,7 +155,9 @@ class JlcpcbToolsDatabaseAdapter:
             raise CopperbrainError(ErrorCode.INVALID_INPUT, "Component search query is empty")
         expression = " AND ".join(f'"{term.replace(chr(34), "")}"' for term in terms)
         try:
-            with sqlite3.connect(f"file:{self.path.as_posix()}?mode=ro", uri=True) as connection:
+            with closing(
+                sqlite3.connect(f"file:{self.path.as_posix()}?mode=ro", uri=True)
+            ) as connection:
                 connection.row_factory = sqlite3.Row
                 rows = connection.execute(
                     "SELECT * FROM parts WHERE parts MATCH ? LIMIT 100", (expression,)
@@ -168,11 +171,20 @@ class JlcpcbToolsDatabaseAdapter:
         return tuple(self._normalize(row) for row in rows)
 
     def details(self, lcsc: str) -> ComponentCandidate:
-        with sqlite3.connect(f"file:{self.path.as_posix()}?mode=ro", uri=True) as connection:
-            connection.row_factory = sqlite3.Row
-            row = connection.execute(
-                'SELECT * FROM parts WHERE "LCSC Part" = ? LIMIT 1', (lcsc,)
-            ).fetchone()
+        try:
+            with closing(
+                sqlite3.connect(f"file:{self.path.as_posix()}?mode=ro", uri=True)
+            ) as connection:
+                connection.row_factory = sqlite3.Row
+                row = connection.execute(
+                    'SELECT * FROM parts WHERE "LCSC Part" = ? LIMIT 1', (lcsc,)
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise CopperbrainError(
+                ErrorCode.INTEGRATION_UNAVAILABLE,
+                "JLCPCB Tools database cannot be queried",
+                details={"reason": str(exc)},
+            ) from exc
         if row is None:
             raise CopperbrainError(
                 ErrorCode.NOT_FOUND, "Component was not found", details={"lcsc": lcsc}

@@ -83,6 +83,16 @@ def test_parse_price_breaks_and_database_adapter(tmp_path: Path) -> None:
         adapter.details("C2")
 
 
+def test_database_adapter_wraps_sqlite_errors(tmp_path: Path) -> None:
+    corrupt = tmp_path / "corrupt.db"
+    corrupt.write_bytes(b"this is not a sqlite database")
+    adapter = JlcpcbToolsDatabaseAdapter(corrupt)
+    with pytest.raises(CopperbrainError, match="cannot be queried"):
+        adapter.search("buck")
+    with pytest.raises(CopperbrainError, match="cannot be queried"):
+        adapter.details("C1")
+
+
 def test_configured_catalog_prefers_recording_then_database(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

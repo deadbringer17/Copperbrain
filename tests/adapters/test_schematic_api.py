@@ -161,3 +161,49 @@ def test_relayout_pin_labels_extend_away_from_opposite_passive_pins(tmp_path: Pa
     label_y = {str(label.text): label.position.y for label in reloaded.labels}
     assert label_y["VIN"] < component.position.y
     assert label_y["GND"] > component.position.y
+
+
+def test_relayout_pin_labels_follow_pin_orientation_on_tall_connectors(tmp_path: Path) -> None:
+    """Labels on side pins must extend sideways, not stack along the connector column."""
+    schematic = tmp_path / "connector.kicad_sch"
+    kicad_sch_api.create_schematic("connector").save(schematic)
+    operations = [
+        ChangeOperation(
+            kind="add_component",
+            target="J1",
+            parameters={"lib_id": "Connector_Generic:Conn_01x10", "x": 100, "y": 100},
+        )
+    ]
+    pins = ("1", "5", "10")
+    for pin in pins:
+        net = f"NET_{pin}"
+        operations.extend(
+            (
+                ChangeOperation(
+                    kind="label",
+                    target=f"{net}:J1.{pin}",
+                    parameters={"text": net, "reference": "J1", "pin": pin},
+                ),
+                ChangeOperation(
+                    kind="relayout_pin_label",
+                    target=f"{net}:J1.{pin}",
+                    parameters={
+                        "text": net,
+                        "reference": "J1",
+                        "pin": pin,
+                        "stub_length_mm": 10.16,
+                    },
+                ),
+            )
+        )
+
+    SchematicApiAdapter().apply(schematic, tuple(operations))
+
+    reloaded = kicad_sch_api.load_schematic(str(schematic))
+    labels = {str(label.text): label for label in reloaded.labels}
+    for pin in pins:
+        pin_position = reloaded.get_component_pin_position("J1", pin)
+        assert pin_position is not None
+        label = labels[f"NET_{pin}"]
+        assert label.position.y == pytest.approx(pin_position.y)
+        assert abs(label.position.x - pin_position.x) == pytest.approx(10.16)

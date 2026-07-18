@@ -8,6 +8,22 @@ from pathlib import Path
 from platformdirs import user_cache_path, user_data_path
 from pydantic import BaseModel, ConfigDict, Field
 
+from copperbrain.errors import CopperbrainError
+from copperbrain.models import ErrorCode
+
+
+def _numeric_env(name: str, raw: str | None, default: float, *, integer: bool = False) -> float:
+    if not raw:
+        return default
+    try:
+        return int(raw) if integer else float(raw)
+    except ValueError as exc:
+        raise CopperbrainError(
+            ErrorCode.INVALID_INPUT,
+            f"Environment variable {name} must be numeric",
+            details={"value": raw},
+        ) from exc
+
 
 class Settings(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -50,19 +66,22 @@ class Settings(BaseModel):
             allowed_download_hosts=allowed_hosts,
             freerouting_jar=Path(freerouting_jar) if freerouting_jar else None,
             freerouting_java=Path(freerouting_java) if freerouting_java else None,
-            freerouting_timeout_seconds=(
-                float(freerouting_timeout)
-                if freerouting_timeout
-                else defaults.freerouting_timeout_seconds
+            freerouting_timeout_seconds=_numeric_env(
+                "COPPERBRAIN_FREEROUTING_TIMEOUT_SECONDS",
+                freerouting_timeout,
+                defaults.freerouting_timeout_seconds,
             ),
-            freerouting_stall_seconds=(
-                float(freerouting_stall)
-                if freerouting_stall
-                else defaults.freerouting_stall_seconds
+            freerouting_stall_seconds=_numeric_env(
+                "COPPERBRAIN_FREEROUTING_STALL_SECONDS",
+                freerouting_stall,
+                defaults.freerouting_stall_seconds,
             ),
-            freerouting_normalization_limit=(
-                int(freerouting_normalization_limit)
-                if freerouting_normalization_limit
-                else defaults.freerouting_normalization_limit
+            freerouting_normalization_limit=int(
+                _numeric_env(
+                    "COPPERBRAIN_FREEROUTING_NORMALIZATION_LIMIT",
+                    freerouting_normalization_limit,
+                    defaults.freerouting_normalization_limit,
+                    integer=True,
+                )
             ),
         )

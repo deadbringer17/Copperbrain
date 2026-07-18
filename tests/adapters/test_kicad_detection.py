@@ -34,3 +34,14 @@ def test_detect_kicad_uses_discovered_values(monkeypatch: object, tmp_path: Path
 
 def test_version_key_sorts_kicad_10_after_9() -> None:
     assert kicad_detection._version_key("10.0.1") > kicad_detection._version_key("9.0.6")
+
+
+def test_user_data_directories_prefer_numerically_newest(
+    monkeypatch: object, tmp_path: Path
+) -> None:
+    root = tmp_path / "kicad"
+    for name in ("9.0", "10.0", "8.0"):
+        (root / name).mkdir(parents=True)
+    monkeypatch.setenv("APPDATA", str(tmp_path))  # type: ignore[attr-defined]
+    result = kicad_detection._user_data_directories()
+    assert [path.name for path in result] == ["10.0", "9.0", "8.0"]

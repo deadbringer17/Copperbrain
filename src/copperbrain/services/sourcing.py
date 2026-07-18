@@ -13,8 +13,10 @@ from copperbrain.models import ComponentCandidate, PriceBreak, RequirementSet
 
 def unit_price_at(price_breaks: tuple[PriceBreak, ...], quantity: int) -> float | None:
     """Return the best applicable unit price without extrapolating below MOQ."""
-    applicable = [item.unit_price for item in price_breaks if item.quantity <= quantity]
-    return applicable[-1] if applicable else None
+    applicable = [item for item in price_breaks if item.quantity <= quantity]
+    if not applicable:
+        return None
+    return max(applicable, key=lambda item: item.quantity).unit_price
 
 
 def estimate_component_cost(candidate: ComponentCandidate, quantity: int) -> dict[str, object]:

@@ -37,7 +37,7 @@ def generate_bom(summary: ProjectSummary) -> tuple[BomLine, ...]:
             mpn=mpn,
         )
         for (value, footprint, lcsc, mpn), references in sorted(
-            groups.items(), key=lambda item: item[1][0]
+            groups.items(), key=lambda item: min(item[1])
         )
     )
 

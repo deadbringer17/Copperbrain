@@ -1,6 +1,9 @@
 from pathlib import Path
 
+import pytest
+
 from copperbrain.config import Settings
+from copperbrain.errors import CopperbrainError
 
 
 def test_settings_environment_overrides(monkeypatch: object, tmp_path: Path) -> None:
@@ -21,3 +24,15 @@ def test_settings_environment_overrides(monkeypatch: object, tmp_path: Path) -> 
     assert settings.freerouting_timeout_seconds == 120
     assert settings.freerouting_stall_seconds == 30
     assert settings.freerouting_normalization_limit == 25
+
+
+def test_settings_reject_non_numeric_environment_values(monkeypatch: object) -> None:
+    monkeypatch.setenv("COPPERBRAIN_FREEROUTING_TIMEOUT_SECONDS", "not-a-number")  # type: ignore[attr-defined]
+    with pytest.raises(CopperbrainError, match="must be numeric"):
+        Settings.from_environment()
+
+
+def test_settings_reject_non_integer_normalization_limit(monkeypatch: object) -> None:
+    monkeypatch.setenv("COPPERBRAIN_FREEROUTING_NORMALIZATION_LIMIT", "25.5")  # type: ignore[attr-defined]
+    with pytest.raises(CopperbrainError, match="must be numeric"):
+        Settings.from_environment()

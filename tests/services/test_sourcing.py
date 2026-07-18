@@ -32,6 +32,17 @@ def test_unit_price_at_respects_moq_and_breaks() -> None:
     assert unit_price_at(breaks, 100) == 0.5
 
 
+def test_unit_price_at_handles_unsorted_breaks() -> None:
+    breaks = (
+        PriceBreak(quantity=100, unit_price=0.5),
+        PriceBreak(quantity=10, unit_price=0.8),
+        PriceBreak(quantity=1, unit_price=1.0),
+    )
+    assert unit_price_at(breaks, 50) == 0.8
+    assert unit_price_at(breaks, 100) == 0.5
+    assert unit_price_at(breaks, 5) == 1.0
+
+
 def test_rank_filters_and_is_deterministic() -> None:
     requirements = RequirementSet(
         sourcing={"prefer_basic": True, "min_stock": 10, "category": "basic"}

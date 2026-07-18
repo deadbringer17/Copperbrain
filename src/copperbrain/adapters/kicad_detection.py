@@ -98,7 +98,13 @@ def _user_data_directories() -> tuple[Path, ...]:
     root = Path(appdata) / "kicad"
     if not root.is_dir():
         return ()
-    return tuple(sorted((path for path in root.iterdir() if path.is_dir()), reverse=True))
+    return tuple(
+        sorted(
+            (path for path in root.iterdir() if path.is_dir()),
+            key=lambda path: (_version_key(path.name), path.name),
+            reverse=True,
+        )
+    )
 
 
 def _detect_plugins(data_dirs: tuple[Path, ...]) -> tuple[IntegrationStatus, ...]:
