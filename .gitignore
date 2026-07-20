@@ -10,6 +10,7 @@ __pycache__/
 dist/
 build/
 tmp/
+video/
 
 # Copperbrain runtime data and project outputs
 .copperbrain/
@@ -26,3 +27,12 @@ copperbrain-output/
 *.gbr
 *.drl
 *.zip
+
+# Secrets / local env / IDE
+.env
+.env.*
+*.pem
+*.key
+.vscode/
+.idea/
+*.local.json
